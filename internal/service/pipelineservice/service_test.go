@@ -412,10 +412,11 @@ func TestDefaultSyncStage_AlbumMemberDefersToAlbumRegistrar(t *testing.T) {
 
 	stage := defaultSyncStage{albums: registrar}
 	enabled, reason, results := stage.Run(config, archiveservice.PersistResult{
-		SourceID:     "imbGZo",
-		MsgText:      "album caption",
-		MediaGroupID: "gid-1",
-		ChatID:       -1001,
+		SourceID:          "imbGZo",
+		MsgText:           "album caption",
+		MediaGroupID:      "gid-1",
+		ChatID:            -1001,
+		ArchivedMessageID: 77,
 	})
 
 	if !enabled {
@@ -431,7 +432,7 @@ func TestDefaultSyncStage_AlbumMemberDefersToAlbumRegistrar(t *testing.T) {
 		t.Fatalf("expected album member registration, got: %+v", registrar.members)
 	}
 	member := registrar.members[0]
-	if member.SourceID != "imbGZo" || member.MediaGroupID != "gid-1" || member.ChatID != -1001 {
+	if member.SourceID != "imbGZo" || member.MediaGroupID != "gid-1" || member.ChatID != -1001 || member.ArchivedMessageID != 77 {
 		t.Fatalf("unexpected album member: %+v", member)
 	}
 }

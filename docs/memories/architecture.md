@@ -91,7 +91,8 @@ tags:
 
 - Telegram 相册的成员消息是独立 update，但共享 `message.media_group_id`（同一 chat 内唯一）。
 - 归档阶段把 `media_group_id` 持久化到 `messages.media_group_id`，非相册消息为空。
-- `albumservice` 按 `(来源, media_group_id)` 维护静默窗口定时器（默认 5 秒），新成员会顺延窗口。
+- `albumservice` 按 `(来源, media_group_id)` 维护静默窗口定时器（默认 15 秒，可用
+  `socialMediaSync.albumDebounceSeconds` 覆盖），新成员会顺延窗口；收满 10 条（Telegram 上限）立即投递。
 - 窗口到期后从数据库读取整组成员，正文取组内所有非空正文按源消息 ID 顺序拼接，图片按成员顺序收集。
 - 投递前会再次检查分组是否已有同步记录：已有则跳过，避免迟到成员或窗口内手动重同步导致重复发帖。
 - 分组投递结果写入组内每个成员的同步记录，通知只发一条，包含来源链接与图片数量。

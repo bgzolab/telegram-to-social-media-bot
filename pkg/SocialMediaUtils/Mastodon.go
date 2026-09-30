@@ -88,6 +88,7 @@ func postMastodonWithImages(client mastodonClient, message string, imagePaths []
 	}
 
 	result := PublishResult{}
+	skippedImages := 0
 	var lastStatusID mastodon.ID
 	for index, chunk := range chunks {
 		toot := &mastodon.Toot{Visibility: visibility}
@@ -104,6 +105,7 @@ func postMastodonWithImages(client mastodonClient, message string, imagePaths []
 			if err != nil {
 				log.Println(err)
 				uploadErrMessage = describeMastodonMediaUploadError(err)
+				skippedImages++
 				continue
 			}
 			toot.MediaIDs = append(toot.MediaIDs, attachment.ID)
@@ -133,6 +135,10 @@ func postMastodonWithImages(client mastodonClient, message string, imagePaths []
 			result.RemoteURL = post.URL
 		}
 		lastStatusID = post.ID
+	}
+
+	if result.Success && skippedImages > 0 && result.ErrorMessage == "" {
+		result.ErrorMessage = fmt.Sprintf("%d 张图片上传失败，已跳过", skippedImages)
 	}
 
 	return result

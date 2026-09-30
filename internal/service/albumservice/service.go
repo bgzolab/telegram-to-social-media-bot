@@ -22,13 +22,16 @@ import (
 
 const (
 	// DefaultDebounce 是相册聚合的静默窗口：最后一条成员到达后超过该时长没有新成员才触发投递。
-	// 本地归档数据显示组内消息时间差最大 7 秒（中位 1 秒），5 秒可以覆盖常见投递抖动。
-	DefaultDebounce = 5 * time.Second
-	// MaxAlbumSize 是 Telegram 相册成员上限；达到上限时立即投递，不再等待静默窗口。
+	// 本地归档数据显示组内消息时间差最大 7 秒（中位 1 秒），这里取 15 秒（>2 倍观测上界），
+	// 覆盖慢批次投递；窗口内的新成员会顺延，避免相册被截断成两帖。
+	DefaultDebounce = 15 * time.Second
+	// MaxAlbumSize 是 Telegram 相册成员上限：收满即立即投递，不再等待静默窗口。
 	MaxAlbumSize = 10
 	// recoveryWindow 限制启动恢复只处理刚刚归档的相册，避免历史消息被重新投递到社媒。
 	// 取值覆盖“进程在静默窗口内退出”的场景即可，窗口之外的分组只能通过手动重同步补投。
 	recoveryWindow = 30 * time.Minute
+	// maxDeliveryAttempts 是单个分组的最大投递尝试次数，超过后放弃并记录日志。
+	maxDeliveryAttempts = 3
 )
 
 // MessageSender 是相册服务发送通知所需的最小 Telegram 接口，*bot.Bot 已满足。
@@ -38,9 +41,10 @@ type MessageSender interface {
 
 // Member 描述一条已归档的相册成员。
 type Member struct {
-	SourceID     string // 归档来源（频道 username / 会话ID），与 Entity.Message.Username 一致
-	MediaGroupID string // Telegram 相册分组ID
-	ChatID       int64  // 接收消息的会话ID，用于通知回退
+	SourceID          string // 归档来源（频道 username / 会话ID），与 Entity.Message.Username 一致
+	MediaGroupID      string // Telegram 相册分组ID
+	ChatID            int64  // 接收消息的会话ID，用于通知回退
+	ArchivedMessageID int64  // 归档消息主键，用于统计组内成员数
 }
 
 type groupKey struct {
@@ -49,9 +53,12 @@ type groupKey struct {
 }
 
 type pendingGroup struct {
-	key    groupKey
-	chatID int64
-	timer  stopper
+	key      groupKey
+	chatID   int64
+	timer    stopper
+	members  map[int64]struct{}
+	attempts int
+	force    bool
 }
 
 // stopper 抽象 *time.Timer，便于测试注入可控定时器。
@@ -83,7 +90,7 @@ func New(sender MessageSender, config Entity.Config) *Service {
 	return &Service{
 		sender:   sender,
 		config:   config,
-		debounce: DefaultDebounce,
+		debounce: resolveDebounce(config),
 		pending:  make(map[groupKey]*pendingGroup),
 		now:      time.Now,
 		afterFunc: func(delay time.Duration, callback func()) stopper {
@@ -101,8 +108,17 @@ func New(sender MessageSender, config Entity.Config) *Service {
 	}
 }
 
+// resolveDebounce 解析相册静默窗口：配置未设置或小于 1 秒时回退默认值。
+func resolveDebounce(config Entity.Config) time.Duration {
+	seconds := config.SocialMediaSync.AlbumDebounceSeconds
+	if seconds < 1 {
+		return DefaultDebounce
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 // Register 登记一条相册成员；静默窗口内出现新成员会顺延投递时间。
-// 已产生过同步记录的分组直接忽略，避免迟到的成员触发第二次相册投递。
+// 已产生过同步记录的分组忽略迟到成员（只归档不重发），避免重复发帖。
 func (s *Service) Register(member Member) {
 	if s == nil || member.MediaGroupID == "" || member.SourceID == "" {
 		return
@@ -110,19 +126,21 @@ func (s *Service) Register(member Member) {
 
 	synced, err := s.hasRecords(member.SourceID, member.MediaGroupID)
 	if err != nil {
+		// 读取失败不阻断登记：投递前还会再次预检，最坏情况是重复投递而不是静默丢弃。
 		LogUtils.GetLogger().Printf("相册同步状态检查失败: %v\n", err)
-		return
 	}
-	if synced {
+	if err == nil && synced {
+		LogUtils.GetLogger().Printf("相册分组已投递，跳过迟到成员: source=%s gid=%s\n", member.SourceID, member.MediaGroupID)
 		return
 	}
 
 	key := groupKey{sourceID: member.SourceID, mediaGroupID: member.MediaGroupID}
-	s.schedule(key, member.ChatID, s.debounce)
+	s.schedule(key, member.ChatID, s.debounce, member.ArchivedMessageID)
 }
 
 // RecoverPending 在进程启动时恢复最近归档但未完成投递的相册分组。
-// 这样做的原因是静默窗口定时器只存在于内存，重启会丢失仍未投递的分组。
+// 这样做的原因是静默窗口定时器只存在于内存，重启会丢失仍未投递的分组；
+// 仍在窗口内的分组按剩余窗口调度，而不是直接跳过。
 func (s *Service) RecoverPending() {
 	if s == nil {
 		return
@@ -144,26 +162,51 @@ func (s *Service) RecoverPending() {
 		if err != nil || len(messages) == 0 {
 			continue
 		}
-		if now.Sub(latestCreatedTime(messages)) < s.debounce {
-			// 疑似仍在收集中，交给正常注册路径处理。
-			continue
-		}
 
 		key := groupKey{sourceID: group.Username, mediaGroupID: group.MediaGroupID}
-		s.schedule(key, 0, 0)
+		delay := s.debounce - now.Sub(latestCreatedTime(messages))
+		if delay < 0 {
+			delay = 0
+		}
+		s.schedule(key, 0, delay, 0)
 	}
 }
 
-// schedule 注册/刷新分组的定时器。同一分组重复注册会停止旧定时器，只保留最后一次。
-func (s *Service) schedule(key groupKey, chatID int64, delay time.Duration) {
+// schedule 注册/刷新分组的定时器。同一分组重复注册会停止旧定时器并沿用已记录的成员集合。
+func (s *Service) schedule(key groupKey, chatID int64, delay time.Duration, archivedMessageID int64) {
+	members := make(map[int64]struct{}, MaxAlbumSize)
+	if existing, ok := s.pending[key]; ok {
+		existing.timer.Stop()
+		members = existing.members
+	}
+	if archivedMessageID > 0 {
+		members[archivedMessageID] = struct{}{}
+	}
+
+	// Telegram 相册上限为 10 条：收满立即投递，不必再等静默窗口。
+	force := len(members) >= MaxAlbumSize
+	if force {
+		delay = 0
+	}
+
+	s.replace(key, chatID, delay, members, 0, force)
+}
+
+// retry 在投递异常时按静默窗口重排定时器，超过尝试上限后放弃。
+func (s *Service) retry(group *pendingGroup, cause error) {
+	if group.attempts+1 >= maxDeliveryAttempts {
+		LogUtils.GetLogger().Printf("相册投递重试达到上限，放弃: source=%s gid=%s err=%v\n", group.key.sourceID, group.key.mediaGroupID, cause)
+		return
+	}
+	LogUtils.GetLogger().Printf("相册投递失败，等待重试: source=%s gid=%s err=%v\n", group.key.sourceID, group.key.mediaGroupID, cause)
+	s.replace(group.key, group.chatID, s.debounce, group.members, group.attempts+1, group.force)
+}
+
+func (s *Service) replace(key groupKey, chatID int64, delay time.Duration, members map[int64]struct{}, attempts int, force bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if existing, ok := s.pending[key]; ok {
-		existing.timer.Stop()
-	}
-
-	group := &pendingGroup{key: key, chatID: chatID}
+	group := &pendingGroup{key: key, chatID: chatID, members: members, attempts: attempts, force: force}
 	group.timer = s.afterFunc(delay, func() {
 		s.flush(group)
 	})
@@ -192,13 +235,27 @@ func (s *Service) deliver(group *pendingGroup) {
 	}
 
 	messages, err := s.loadMessages(group.key.sourceID, group.key.mediaGroupID)
-	if err != nil {
-		LogUtils.GetLogger().Printf("相册成员加载失败: %v\n", err)
+	if err != nil || len(messages) == 0 {
+		s.retry(group, err)
 		return
 	}
-	if len(messages) == 0 {
+
+	// 窗口内可能又有成员到达：顺延到剩余窗口再投递，避免把相册截断成两帖。
+	// 收满上限的分组已经完整，不受窗口检查影响。
+	if !group.force {
+		if remaining := s.debounce - s.now().Sub(latestCreatedTime(messages)); remaining > 0 {
+			s.replace(group.key, group.chatID, remaining, group.members, group.attempts, group.force)
+			return
+		}
+	}
+
+	// 与手动重同步共享相册维度防重入，避免聚合投递与手动重同步并发重复发帖。
+	scope := syncservice.AlbumScopeKey(group.key.sourceID, group.key.mediaGroupID, 0)
+	if !syncservice.AcquireAlbumDispatch(scope) {
+		s.retry(group, nil)
 		return
 	}
+	defer syncservice.ReleaseAlbumDispatch(scope)
 
 	head := syncservice.AlbumHead(messages)
 	payload := syncservice.BuildPayloadWithImages(syncservice.AlbumText(messages), syncservice.CollectAlbumImagePaths(s.config, messages))

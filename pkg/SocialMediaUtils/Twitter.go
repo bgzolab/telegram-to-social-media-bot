@@ -105,6 +105,7 @@ func sendTwitterImagesPostDetailed(globalConfig Entity.Config, message string, i
 	}
 
 	result := PublishResult{}
+	skippedImages := 0
 	var lastTweetID string
 	for index, chunk := range chunks {
 		p := &manageTweetTypes.CreateInput{}
@@ -121,6 +122,7 @@ func sendTwitterImagesPostDetailed(globalConfig Entity.Config, message string, i
 			if err != nil {
 				fmt.Println(err)
 				uploadErr = err
+				skippedImages++
 				continue
 			}
 			if p.Media == nil {
@@ -154,6 +156,10 @@ func sendTwitterImagesPostDetailed(globalConfig Entity.Config, message string, i
 			result.RemoteURL = fmt.Sprintf("https://twitter.com/i/web/status/%s", remoteID)
 		}
 		lastTweetID = remoteID
+	}
+
+	if result.Success && skippedImages > 0 && result.ErrorMessage == "" {
+		result.ErrorMessage = fmt.Sprintf("%d 张图片上传失败，已跳过", skippedImages)
 	}
 
 	return result

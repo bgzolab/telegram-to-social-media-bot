@@ -43,6 +43,9 @@ type Config struct {
 		Enable        bool     `yaml:"enable"`
 		TargetChannel []string `yaml:"targetChannel"`
 
+		// AlbumDebounceSeconds 是相册聚合静默窗口，单位秒；0 或缺省时使用默认值。
+		AlbumDebounceSeconds int `yaml:"albumDebounceSeconds"`
+
 		Mastodon struct {
 			Enable       bool   `yaml:"enable"`
 			Instance     string `yaml:"instance"`

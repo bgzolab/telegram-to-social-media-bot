@@ -11,23 +11,27 @@ import (
 )
 
 type fakeMastodonClient struct {
-	uploadedPath  string
-	uploadedPaths []string
-	postedToot    *mastodon.Toot
-	postedToots   []*mastodon.Toot
-	uploadErr     error
-	postErr       error
-	uploadCount   int
-	postCount     int
+	uploadedPath    string
+	uploadedPaths   []string
+	postedToot      *mastodon.Toot
+	postedToots     []*mastodon.Toot
+	uploadErr       error
+	uploadErrAtCall int
+	postErr         error
+	uploadCount     int
+	postCount       int
 }
 
 func (f *fakeMastodonClient) UploadMedia(_ context.Context, file string) (*mastodon.Attachment, error) {
 	f.uploadedPath = file
 	f.uploadedPaths = append(f.uploadedPaths, file)
+	f.uploadCount++
 	if f.uploadErr != nil {
 		return nil, f.uploadErr
 	}
-	f.uploadCount++
+	if f.uploadErrAtCall > 0 && f.uploadCount == f.uploadErrAtCall {
+		return nil, fmt.Errorf("upload failed")
+	}
 	return &mastodon.Attachment{ID: mastodon.ID(fmt.Sprintf("attachment-%d", f.uploadCount))}, nil
 }
 
@@ -187,5 +191,30 @@ func TestSendMastodonWithImages_ThreadsOverLimitImages(t *testing.T) {
 	}
 	if second.Status != "" {
 		t.Fatalf("expected continuation toot without text, got: %s", second.Status)
+	}
+}
+
+func TestSendMastodonWithImages_ReportsSkippedUploads(t *testing.T) {
+	client := &fakeMastodonClient{uploadErrAtCall: 2}
+	originalFactory := newMastodonClient
+	newMastodonClient = func(_ *mastodon.Config) mastodonClient {
+		return client
+	}
+	defer func() {
+		newMastodonClient = originalFactory
+	}()
+
+	config := Entity.Config{}
+	config.SocialMediaSync.Mastodon.Enable = true
+
+	result := SendMastodonWithImagesDetailed(config, "album", []string{"/tmp/a.jpg", "/tmp/b.jpg", "/tmp/c.jpg"})
+	if !result.Success {
+		t.Fatalf("expected publish success despite one skipped image, got: %+v", result)
+	}
+	if result.ErrorMessage != "1 张图片上传失败，已跳过" {
+		t.Fatalf("expected skipped image notice, got: %s", result.ErrorMessage)
+	}
+	if len(client.postedToots) != 1 || len(client.postedToots[0].MediaIDs) != 2 {
+		t.Fatalf("expected toot with two media ids, got: %+v", client.postedToots)
 	}
 }

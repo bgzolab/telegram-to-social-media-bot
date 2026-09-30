@@ -95,6 +95,7 @@ func sendBlueSkyImagesPostDetailed(config Entity.Config, message string, imagePa
 	}
 
 	result := PublishResult{}
+	skippedImages := 0
 	var rootURI, rootCID, parentURI, parentCID string
 	for index, chunk := range chunks {
 		postText := ""
@@ -102,7 +103,8 @@ func sendBlueSkyImagesPostDetailed(config Entity.Config, message string, imagePa
 			postText = message
 		}
 
-		post, err := buildBlueSkyPostWithImages(postText, chunk, bearerToken, buildBlueSkyReplyRef(rootURI, rootCID, parentURI, parentCID))
+		post, skipped, err := buildBlueSkyPostWithImages(postText, chunk, bearerToken, buildBlueSkyReplyRef(rootURI, rootCID, parentURI, parentCID))
+		skippedImages += skipped
 		if err != nil {
 			if index == 0 {
 				return PublishResult{ErrorMessage: err.Error()}
@@ -135,6 +137,10 @@ func sendBlueSkyImagesPostDetailed(config Entity.Config, message string, imagePa
 		parentURI, parentCID = created.URI, created.CID
 	}
 
+	if result.Success && skippedImages > 0 && result.ErrorMessage == "" {
+		result.ErrorMessage = fmt.Sprintf("%d 张图片上传失败，已跳过", skippedImages)
+	}
+
 	return result
 }
 
@@ -161,12 +167,14 @@ func buildBlueSkyPost(message string, imagePath string, bearerToken string) (map
 	if imagePath != "" {
 		imagePaths = []string{imagePath}
 	}
-	return buildBlueSkyPostWithImages(message, imagePaths, bearerToken, nil)
+	post, _, err := buildBlueSkyPostWithImages(message, imagePaths, bearerToken, nil)
+	return post, err
 }
 
 // buildBlueSkyPostWithImages 构造帖子记录：文本 facets + 多图 embed + 可选线程回复引用。
-// 单张图片上传失败时跳过该图片，只有全部图片都失败才返回错误，交由上层降级为纯文本。
-func buildBlueSkyPostWithImages(message string, imagePaths []string, bearerToken string, reply map[string]any) (map[string]any, error) {
+// 返回被跳过的图片数量：单张图片上传失败时跳过该图片，只有全部图片都失败才返回错误，
+// 交由上层决定降级为纯文本；部分失败会由调用方写入投递结果的错误信息。
+func buildBlueSkyPostWithImages(message string, imagePaths []string, bearerToken string, reply map[string]any) (map[string]any, int, error) {
 	when := time.Now().Format("2006-01-02T15:04:05.999Z")
 	post := map[string]any{
 		"$type":     "app.bsky.feed.post",
@@ -183,7 +191,7 @@ func buildBlueSkyPostWithImages(message string, imagePaths []string, bearerToken
 	}
 
 	if len(imagePaths) == 0 {
-		return post, nil
+		return post, 0, nil
 	}
 
 	images := make([]map[string]any, 0, len(imagePaths))
@@ -204,7 +212,7 @@ func buildBlueSkyPostWithImages(message string, imagePaths []string, bearerToken
 		if uploadErr == nil {
 			uploadErr = os.ErrInvalid
 		}
-		return nil, uploadErr
+		return nil, len(imagePaths), uploadErr
 	}
 
 	post["embed"] = map[string]any{
@@ -212,7 +220,7 @@ func buildBlueSkyPostWithImages(message string, imagePaths []string, bearerToken
 		"images": images,
 	}
 
-	return post, nil
+	return post, len(imagePaths) - len(images), nil
 }
 
 func uploadBlueSkyBlob(imagePath string, bearerToken string) (map[string]any, error) {

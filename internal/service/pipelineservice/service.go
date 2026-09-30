@@ -79,9 +79,10 @@ func (s defaultSyncStage) Run(config Entity.Config, persistResult archiveservice
 		// 相册成员不在到达时即时投递，先登记分组，等静默窗口到期后由 albumservice 聚合投递一次。
 		if persistResult.MediaGroupID != "" && s.albums != nil {
 			s.albums.Register(albumservice.Member{
-				SourceID:     persistResult.SourceID,
-				MediaGroupID: persistResult.MediaGroupID,
-				ChatID:       persistResult.ChatID,
+				SourceID:          persistResult.SourceID,
+				MediaGroupID:      persistResult.MediaGroupID,
+				ChatID:            persistResult.ChatID,
+				ArchivedMessageID: persistResult.ArchivedMessageID,
 			})
 			return syncEnabled, syncReason, results
 		}

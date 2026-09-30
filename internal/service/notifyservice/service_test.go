@@ -122,3 +122,17 @@ func TestBuildAlbumSyncNotifications_WithoutSourceOrImages(t *testing.T) {
 		t.Fatalf("expected no notifications without results, got: %+v", empty)
 	}
 }
+
+func TestBuildSyncNotifications_PartialImageFailureOnSuccess(t *testing.T) {
+	results := []syncservice.DispatchResult{
+		{Platform: "BlueSky", Success: true, ImageRequested: true, UsedImage: true, ErrorMessage: "1 张图片上传失败，已跳过"},
+	}
+
+	notifications := BuildSyncNotifications(true, "", results)
+	if len(notifications) != 1 {
+		t.Fatalf("unexpected notifications: %+v", notifications)
+	}
+	if notifications[0] != "消息已同步至 BlueSky，并附带图片，但存在部分失败: 1 张图片上传失败，已跳过" {
+		t.Fatalf("unexpected notification: %s", notifications[0])
+	}
+}

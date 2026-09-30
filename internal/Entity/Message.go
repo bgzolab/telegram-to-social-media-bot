@@ -25,7 +25,7 @@ type Message struct {
 	MediaGroupID string       `gorm:"index:idx_message_media_group,priority:2"` // Telegram 相册分组ID，非相册消息为空
 	Attachments  []Attachment `gorm:"foreignKey:MessageID"`                     // 消息附件
 
-	CreatedTime time.Time // 消息存档日期
+	CreatedTime time.Time `gorm:"index:idx_message_created_time"` // 消息存档日期，相册恢复扫描按此过滤
 }
 
 type Attachment struct {

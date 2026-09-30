@@ -423,9 +423,12 @@ func TestBuildBlueSkyPostWithImages_EmbedsAllImages(t *testing.T) {
 	stubBlueSkyBlobUpload(t)
 	imagePaths := writeTestImages(t, 3)
 
-	post, err := buildBlueSkyPostWithImages("albums", imagePaths, "token", nil)
+	post, skipped, err := buildBlueSkyPostWithImages("albums", imagePaths, "token", nil)
 	if err != nil {
 		t.Fatalf("expected build success, got: %v", err)
+	}
+	if skipped != 0 {
+		t.Fatalf("expected no skipped images, got %d", skipped)
 	}
 
 	embed := post["embed"].(map[string]any)
@@ -445,9 +448,12 @@ func TestBuildBlueSkyPostWithImages_AddsReplyRef(t *testing.T) {
 		"root":   map[string]any{"uri": "at://root", "cid": "cid-root"},
 		"parent": map[string]any{"uri": "at://parent", "cid": "cid-parent"},
 	}
-	post, err := buildBlueSkyPostWithImages("", nil, "token", reply)
+	post, skipped, err := buildBlueSkyPostWithImages("", nil, "token", reply)
 	if err != nil {
 		t.Fatalf("expected build success, got: %v", err)
+	}
+	if skipped != 0 {
+		t.Fatalf("expected no skipped images, got %d", skipped)
 	}
 
 	storedReply := post["reply"].(map[string]any)
@@ -521,5 +527,86 @@ func TestSendBlueSkyWithImagesDetailed_ThreadsOverLimitImages(t *testing.T) {
 	reply := second["reply"].(map[string]any)
 	if reply["root"].(map[string]any)["uri"] != "at://post-1" || reply["parent"].(map[string]any)["uri"] != "at://post-1" {
 		t.Fatalf("unexpected continuation reply refs: %+v", reply)
+	}
+}
+
+func TestBuildBlueSkyPostWithImages_CountsSkippedUploads(t *testing.T) {
+	originalClient := blueSkyHTTPClient
+	requests := 0
+	blueSkyHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if requests == 2 {
+			return nil, fmt.Errorf("upload failed")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"blob":{"$type":"blob","mimeType":"image/png","size":8}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	defer func() {
+		blueSkyHTTPClient = originalClient
+	}()
+
+	post, skipped, err := buildBlueSkyPostWithImages("albums", writeTestImages(t, 3), "token", nil)
+	if err != nil {
+		t.Fatalf("expected build success with partial uploads, got: %v", err)
+	}
+	if skipped != 1 {
+		t.Fatalf("expected 1 skipped image, got %d", skipped)
+	}
+	images := post["embed"].(map[string]any)["images"].([]map[string]any)
+	if len(images) != 2 {
+		t.Fatalf("expected 2 embedded images, got %d", len(images))
+	}
+}
+
+func TestSendBlueSkyWithImagesDetailed_ReportsSkippedUploads(t *testing.T) {
+	originalClient := blueSkyHTTPClient
+	requests := 0
+	blueSkyHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if requests == 2 {
+			return nil, fmt.Errorf("upload failed")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"blob":{"$type":"blob","mimeType":"image/png","size":8}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	defer func() {
+		blueSkyHTTPClient = originalClient
+	}()
+
+	originalSession := blueSkyCreateSession
+	originalRecord := blueSkyCreateRecord
+	defer func() {
+		blueSkyCreateSession = originalSession
+		blueSkyCreateRecord = originalRecord
+	}()
+
+	blueSkyCreateSession = func(dst any, identifier string, password string) error {
+		session := dst.(*server.CreateSessionResponse)
+		session.AccessJWT = "token"
+		session.DID = "did:plc:test"
+		return nil
+	}
+	blueSkyCreateRecord = func(dst any, bearerToken string, repoName string, collection string, record any) error {
+		response := dst.(*repo.CreateRecordResponse)
+		response.URI = "at://post-1"
+		response.CID = "cid-1"
+		return nil
+	}
+
+	config := Entity.Config{}
+	config.SocialMediaSync.BlueSky.Enable = true
+
+	result := SendBlueSkyWithImagesDetailed(config, "album text", writeTestImages(t, 3))
+	if !result.Success {
+		t.Fatalf("expected publish success despite one skipped image, got: %+v", result)
+	}
+	if result.ErrorMessage != "1 张图片上传失败，已跳过" {
+		t.Fatalf("expected skipped image notice, got: %s", result.ErrorMessage)
 	}
 }

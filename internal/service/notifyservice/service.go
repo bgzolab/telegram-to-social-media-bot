@@ -44,6 +44,11 @@ func BuildSyncNotifications(syncEnabled bool, syncReason string, results []syncs
 				suffix = "，文本已截断"
 			}
 			if result.ImageRequested && result.UsedImage {
+				// 图片全部成功时 ErrorMessage 为空；非空说明线程续发或部分图片失败。
+				if result.ErrorMessage != "" {
+					notifications = append(notifications, fmt.Sprintf("消息已同步至 %s，并附带图片，但存在部分失败%s: %s", result.Platform, suffix, result.ErrorMessage))
+					continue
+				}
 				notifications = append(notifications, fmt.Sprintf("消息已同步至 %s，并附带图片%s!", result.Platform, suffix))
 				continue
 			}

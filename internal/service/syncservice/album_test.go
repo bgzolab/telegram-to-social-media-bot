@@ -200,3 +200,55 @@ func TestManualResync_AlbumMemberResolvesWholeAlbum(t *testing.T) {
 		t.Fatalf("expected saved head message id")
 	}
 }
+
+func TestAlbumScopeKey_GroupedByAlbumAndMessage(t *testing.T) {
+	albumScope := AlbumScopeKey("imbGZo", "gid-1", 42)
+	if albumScope != "album:imbGZo|gid-1" {
+		t.Fatalf("unexpected album scope: %s", albumScope)
+	}
+	if AlbumScopeKey("imbGZo", "gid-1", 43) != albumScope {
+		t.Fatalf("expected album members to share the same scope")
+	}
+
+	messageScope := AlbumScopeKey("imbGZo", "", 42)
+	if messageScope != "message:42" {
+		t.Fatalf("unexpected message scope: %s", messageScope)
+	}
+	if messageScope == AlbumScopeKey("imbGZo", "", 43) {
+		t.Fatalf("expected distinct message scopes")
+	}
+}
+
+func TestManualResync_BlocksWhenAlbumDeliverInFlight(t *testing.T) {
+	setupManualSyncTestDB(t)
+
+	scope := AlbumScopeKey("imbGZo", "gid-manual", 0)
+	if !AcquireAlbumDispatch(scope) {
+		t.Fatalf("expected to acquire album scope for test setup")
+	}
+	defer ReleaseAlbumDispatch(scope)
+
+	config := Entity.Config{}
+	config.SocialMediaSync.TargetChannel = []string{"imbGZo"}
+
+	// 手动重同步应被相册投递互斥挡住，而不是并发重复发帖。
+	archivedID, err := Database.SaveMessage(&Entity.Message{
+		MessageID:    6001,
+		Username:     "imbGZo",
+		Content:      "album caption",
+		MediaGroupID: "gid-manual",
+		MessageDate:  time.Now(),
+		CreatedTime:  time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("failed to save album message: %v", err)
+	}
+
+	result, err := ManualResync(config, archivedID, "twitter")
+	if err != nil {
+		t.Fatalf("manual resync should not fail: %v", err)
+	}
+	if result.Requested {
+		t.Fatalf("expected manual resync to be blocked while album dispatch in flight")
+	}
+}
