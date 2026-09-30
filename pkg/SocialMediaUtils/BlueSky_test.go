@@ -124,3 +124,210 @@ func TestBuildBlueSkyPost_TrimsTrailingPunctuationFromLinkFacet(t *testing.T) {
 		t.Fatalf("unexpected facet uri: %#v", features[0]["uri"])
 	}
 }
+
+func TestBuildBlueSkyPost_AddsTagFacets(t *testing.T) {
+	message := "hello #update #pm"
+
+	post, err := buildBlueSkyPost(message, "", "token")
+	if err != nil {
+		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
+	}
+
+	facets, ok := post["facets"].([]map[string]any)
+	if !ok || len(facets) != 2 {
+		t.Fatalf("expected 2 facets, got: %#v", post["facets"])
+	}
+
+	firstFeatures, ok := facets[0]["features"].([]map[string]any)
+	if !ok || len(firstFeatures) != 1 {
+		t.Fatalf("expected first facet features, got: %#v", facets[0]["features"])
+	}
+	if firstFeatures[0]["$type"] != "app.bsky.richtext.facet#tag" {
+		t.Fatalf("unexpected first facet type: %#v", firstFeatures[0]["$type"])
+	}
+	if firstFeatures[0]["tag"] != "update" {
+		t.Fatalf("unexpected first facet tag: %#v", firstFeatures[0]["tag"])
+	}
+
+	firstIndex, ok := facets[0]["index"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected first facet index, got: %#v", facets[0]["index"])
+	}
+	if firstIndex["byteStart"] != strings.Index(message, "#update") {
+		t.Fatalf("unexpected first facet byteStart: %#v", firstIndex)
+	}
+	if firstIndex["byteEnd"] != strings.Index(message, "#update")+len("#update") {
+		t.Fatalf("unexpected first facet byteEnd: %#v", firstIndex)
+	}
+
+	secondFeatures := facets[1]["features"].([]map[string]any)
+	if secondFeatures[0]["tag"] != "pm" {
+		t.Fatalf("unexpected second facet tag: %#v", secondFeatures[0]["tag"])
+	}
+}
+
+func TestBuildBlueSkyPost_TagFacetUsesUTF8ByteOffsets(t *testing.T) {
+	message := "中文 #标签"
+
+	post, err := buildBlueSkyPost(message, "", "token")
+	if err != nil {
+		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
+	}
+
+	facets := post["facets"].([]map[string]any)
+	if len(facets) != 1 {
+		t.Fatalf("expected 1 facet, got: %d", len(facets))
+	}
+
+	index := facets[0]["index"].(map[string]any)
+	if index["byteStart"] != len("中文 ") {
+		t.Fatalf("expected byteStart %d, got: %#v", len("中文 "), index)
+	}
+	if index["byteEnd"] != len(message) {
+		t.Fatalf("expected byteEnd %d, got: %#v", len(message), index)
+	}
+
+	features := facets[0]["features"].([]map[string]any)
+	if features[0]["tag"] != "标签" {
+		t.Fatalf("unexpected facet tag: %#v", features[0]["tag"])
+	}
+}
+
+func TestBuildBlueSkyPost_SkipsInvalidTagFacets(t *testing.T) {
+	message := "#123 #1_2 #update2026"
+
+	post, err := buildBlueSkyPost(message, "", "token")
+	if err != nil {
+		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
+	}
+
+	facets := post["facets"].([]map[string]any)
+	if len(facets) != 1 {
+		t.Fatalf("expected only the valid hashtag to get a facet, got: %#v", post["facets"])
+	}
+
+	features := facets[0]["features"].([]map[string]any)
+	if features[0]["tag"] != "update2026" {
+		t.Fatalf("unexpected facet tag: %#v", features[0]["tag"])
+	}
+}
+
+func TestBuildBlueSkyPost_TrimsTrailingPunctuationFromTagFacet(t *testing.T) {
+	message := "hello #tag."
+
+	post, err := buildBlueSkyPost(message, "", "token")
+	if err != nil {
+		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
+	}
+
+	facets := post["facets"].([]map[string]any)
+	features := facets[0]["features"].([]map[string]any)
+	if features[0]["tag"] != "tag" {
+		t.Fatalf("unexpected facet tag: %#v", features[0]["tag"])
+	}
+
+	index := facets[0]["index"].(map[string]any)
+	if index["byteEnd"] != strings.Index(message, "#tag")+len("#tag") {
+		t.Fatalf("expected trailing dot outside the facet range, got: %#v", index)
+	}
+}
+
+func TestBuildBlueSkyPost_CombinesLinkAndTagFacets(t *testing.T) {
+	message := "see https://example.com/x #tag"
+
+	post, err := buildBlueSkyPost(message, "", "token")
+	if err != nil {
+		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
+	}
+
+	facets := post["facets"].([]map[string]any)
+	if len(facets) != 2 {
+		t.Fatalf("expected 2 facets, got: %d", len(facets))
+	}
+
+	linkFeatures := facets[0]["features"].([]map[string]any)
+	if linkFeatures[0]["$type"] != "app.bsky.richtext.facet#link" {
+		t.Fatalf("unexpected link facet type: %#v", linkFeatures[0]["$type"])
+	}
+
+	tagFeatures := facets[1]["features"].([]map[string]any)
+	if tagFeatures[0]["$type"] != "app.bsky.richtext.facet#tag" || tagFeatures[0]["tag"] != "tag" {
+		t.Fatalf("unexpected tag facet: %#v", tagFeatures[0])
+	}
+}
+
+func TestBuildBlueSkyPost_DoesNotTagURLFragments(t *testing.T) {
+	message := "see https://example.com/page#section"
+
+	post, err := buildBlueSkyPost(message, "", "token")
+	if err != nil {
+		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
+	}
+
+	facets := post["facets"].([]map[string]any)
+	if len(facets) != 1 {
+		t.Fatalf("expected only the link facet, got: %#v", post["facets"])
+	}
+
+	features := facets[0]["features"].([]map[string]any)
+	if features[0]["$type"] != "app.bsky.richtext.facet#link" {
+		t.Fatalf("unexpected facet type: %#v", features[0]["$type"])
+	}
+}
+
+func TestBuildBlueSkyPost_SkipsTooLongTagFacet(t *testing.T) {
+	validTag := strings.Repeat("a", 64)
+	message := "#" + validTag + " #" + strings.Repeat("b", 65)
+
+	post, err := buildBlueSkyPost(message, "", "token")
+	if err != nil {
+		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
+	}
+
+	facets := post["facets"].([]map[string]any)
+	if len(facets) != 1 {
+		t.Fatalf("expected only the 64-grapheme tag to get a facet, got: %d", len(facets))
+	}
+
+	features := facets[0]["features"].([]map[string]any)
+	if features[0]["tag"] != validTag {
+		t.Fatalf("unexpected facet tag: %#v", features[0]["tag"])
+	}
+}
+
+func TestBuildBlueSkyPost_StopsTagAtUnicodeWhitespace(t *testing.T) {
+	message := "#标签\u3000后续"
+
+	post, err := buildBlueSkyPost(message, "", "token")
+	if err != nil {
+		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
+	}
+
+	facets := post["facets"].([]map[string]any)
+	if len(facets) != 1 {
+		t.Fatalf("expected 1 facet, got: %d", len(facets))
+	}
+
+	features := facets[0]["features"].([]map[string]any)
+	if features[0]["tag"] != "标签" {
+		t.Fatalf("unexpected facet tag: %#v", features[0]["tag"])
+	}
+
+	index := facets[0]["index"].(map[string]any)
+	if index["byteEnd"] != len("#标签") {
+		t.Fatalf("expected the full-width space outside the facet range, got: %#v", index)
+	}
+}
+
+func TestBuildBlueSkyPost_SkipsKeycapEmoji(t *testing.T) {
+	message := "#️⃣ keycap"
+
+	post, err := buildBlueSkyPost(message, "", "token")
+	if err != nil {
+		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
+	}
+
+	if facets, ok := post["facets"]; ok {
+		t.Fatalf("expected no facets for keycap emoji, got: %#v", facets)
+	}
+}

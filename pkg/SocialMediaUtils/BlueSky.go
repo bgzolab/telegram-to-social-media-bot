@@ -9,19 +9,27 @@ import (
 	"strings"
 	"telegram-message-sync-bot/internal/Entity"
 	"time"
+	"unicode"
 
 	"github.com/reiver/go-atproto/com/atproto/repo"
 	"github.com/reiver/go-atproto/com/atproto/server"
+	"github.com/rivo/uniseg"
 )
 
 const blueSkyUploadBlobURL = "https://bsky.social/xrpc/com.atproto.repo.uploadBlob"
 const blueSkyImageMaxBytes = 1000000
+const blueSkyTagMaxGraphemes = 64
+const blueSkyTagMaxBytes = 640
 
 var blueSkyCreateSession = server.CreateSession
 var blueSkyCreateRecord = repo.CreateRecord
 var blueSkyHTTPClient = http.DefaultClient
 
 var blueSkyURLRegexp = regexp.MustCompile(`https?://[^\s]+`)
+
+// blueSkyTagRegexp 对齐官方客户端 @atproto/api 的 TAG_REGEX：
+// hashtag 前缀必须是行首或空白，body 排除空白与零宽字符。
+var blueSkyTagRegexp = regexp.MustCompile(`(?:^|[\s\p{Z}])([#\x{FF03}])([^\s\p{Z}\x{00AD}\x{2060}\x{200A}-\x{200D}\x{20E2}]+)`)
 
 func initBlueSky(config Entity.Config) (username string, password string) {
 	BlueSky := config.SocialMediaSync.BlueSky
@@ -91,7 +99,9 @@ func buildBlueSkyPost(message string, imagePath string, bearerToken string) (map
 		"text":      message,
 		"createdAt": when,
 	}
-	if facets := buildBlueSkyLinkFacets(message); len(facets) > 0 {
+	facets := buildBlueSkyLinkFacets(message)
+	facets = append(facets, buildBlueSkyTagFacets(message)...)
+	if len(facets) > 0 {
 		post["facets"] = facets
 	}
 
@@ -220,4 +230,76 @@ func lastRuneBefore(text string) (rune, int) {
 	}
 	last := runes[len(runes)-1]
 	return last, len(string(last))
+}
+
+// buildBlueSkyTagFacets 将 hashtag 标注为 app.bsky.richtext.facet#tag。
+// Bluesky 客户端不会自行识别正文里的 hashtag，缺少 facet 时只能按纯文本渲染。
+// 规则对齐官方客户端 @atproto/api 的 detectFacets：tag 值不含 '#'，
+// 但 facet 的字节范围包含 '#'，索引为 UTF-8 字节偏移。
+func buildBlueSkyTagFacets(message string) []map[string]any {
+	matches := blueSkyTagRegexp.FindAllStringSubmatchIndex(message, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	facets := make([]map[string]any, 0, len(matches))
+	for _, match := range matches {
+		hashStart := match[2]
+		bodyStart := match[4]
+		body := message[bodyStart:match[5]]
+
+		// 官方规则：'#' 后紧跟变体选择符（如 keycap emoji "#️⃣"）时不算 hashtag。
+		if strings.HasPrefix(body, "\uFE0F") {
+			continue
+		}
+
+		// 尾部标点不计入 tag，也不计入 facet 范围。
+		tag := strings.TrimRightFunc(body, unicode.IsPunct)
+		if !isValidBlueSkyTag(tag) {
+			continue
+		}
+
+		facets = append(facets, map[string]any{
+			"index": map[string]any{
+				"byteStart": hashStart,
+				"byteEnd":   bodyStart + len(tag),
+			},
+			"features": []map[string]any{
+				{
+					"$type": "app.bsky.richtext.facet#tag",
+					"tag":   tag,
+				},
+			},
+		})
+	}
+
+	if len(facets) == 0 {
+		return nil
+	}
+
+	return facets
+}
+
+// isValidBlueSkyTag 对齐官方客户端校验：至少包含一个非数字、非标点字符，
+// 且满足 tag 词法约束（64 graphemes / 640 bytes），避免生成被 PDS 拒绝的 facet。
+func isValidBlueSkyTag(tag string) bool {
+	if tag == "" || len(tag) > blueSkyTagMaxBytes {
+		return false
+	}
+	if uniseg.GraphemeClusterCount(tag) > blueSkyTagMaxGraphemes {
+		return false
+	}
+
+	for _, r := range tag {
+		if (r >= '0' && r <= '9') || unicode.IsSpace(r) || unicode.IsPunct(r) {
+			continue
+		}
+		switch r {
+		case '\u00AD', '\u2060', '\u200A', '\u200B', '\u200C', '\u200D', '\u20E2':
+			continue
+		}
+		return true
+	}
+
+	return false
 }
