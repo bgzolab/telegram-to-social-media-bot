@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -88,7 +89,10 @@ func newAlbumTestHarness(config Entity.Config, sender *fakeMessageSender) *album
 func setupAlbumTestDB(t *testing.T) {
 	t.Helper()
 
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	// 使用共享缓存的内存库：SQLite 的 ":memory:" 是每连接一个库，
+	// 并发登记/投递会从连接池拿到看不到表结构的新连接。
+	dsn := fmt.Sprintf("file:albumservice-%d?mode=memory&cache=shared", time.Now().UnixNano())
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("failed to open sqlite memory db: %v", err)
 	}
@@ -315,12 +319,12 @@ func TestDeliver_SkipsWhenAlbumGetsSyncedBeforeFlush(t *testing.T) {
 		t.Fatalf("expected one scheduled flush, got %d", len(h.schedules))
 	}
 
-	// 模拟静默窗口内发生了手动重同步：投递前应重新检查并跳过。
+	// 模拟静默窗口内自动投递已完成：投递前复查应跳过。
 	if _, err := Database.SaveSyncRecord(&Entity.SyncRecord{
 		ArchivedMessageID: messages[0].ID,
 		Platform:          "Mastodon",
 		Status:            Entity.SyncStatusSucceeded,
-		Trigger:           Entity.SyncTriggerManual,
+		Trigger:           Entity.SyncTriggerAutomatic,
 		CreatedTime:       time.Now(),
 	}); err != nil {
 		t.Fatalf("failed to seed sync record: %v", err)
@@ -328,7 +332,63 @@ func TestDeliver_SkipsWhenAlbumGetsSyncedBeforeFlush(t *testing.T) {
 
 	h.run(0)
 	if len(h.dispatched) != 0 {
-		t.Fatalf("expected flush to skip already synced album, got: %+v", h.dispatched)
+		t.Fatalf("expected flush to skip already delivered album, got: %+v", h.dispatched)
+	}
+}
+
+func TestDeliver_ProceedsWhenOnlyManualRecordsExist(t *testing.T) {
+	setupAlbumTestDB(t)
+
+	channelDir := t.TempDir()
+	messages := seedAlbumMessages(t, channelDir, "gid-manual-record", 550, time.Now().Add(-time.Minute))
+
+	// 手动重同步只覆盖了单个平台：自动投递不应被它抑制，否则其他平台永久缺帖。
+	if _, err := Database.SaveSyncRecord(&Entity.SyncRecord{
+		ArchivedMessageID: messages[0].ID,
+		Platform:          "Twitter",
+		Status:            Entity.SyncStatusSucceeded,
+		Trigger:           Entity.SyncTriggerManual,
+		CreatedTime:       time.Now(),
+	}); err != nil {
+		t.Fatalf("failed to seed manual sync record: %v", err)
+	}
+
+	config := Entity.Config{}
+	config.Output.ChannelDir = channelDir
+	h := newAlbumTestHarness(config, &fakeMessageSender{})
+
+	h.service.Register(Member{SourceID: "imbGZo", MediaGroupID: "gid-manual-record", ChatID: 42})
+	if len(h.schedules) != 1 {
+		t.Fatalf("expected manual records not to suppress registration, got %d schedules", len(h.schedules))
+	}
+
+	h.run(0)
+	if len(h.dispatched) != 1 {
+		t.Fatalf("expected album delivery despite manual records, got: %+v", h.dispatched)
+	}
+}
+
+func TestDeliver_RetriesWhenAllPlatformsFail(t *testing.T) {
+	setupAlbumTestDB(t)
+
+	channelDir := t.TempDir()
+	messages := seedAlbumMessages(t, channelDir, "gid-all-failed", 700, time.Now().Add(-time.Minute))
+
+	config := Entity.Config{}
+	config.Output.ChannelDir = channelDir
+	h := newAlbumTestHarness(config, &fakeMessageSender{})
+	h.service.dispatch = func(_ Entity.Config, _ syncservice.Payload) []syncservice.DispatchResult {
+		return []syncservice.DispatchResult{{Platform: "BlueSky", Success: false, ErrorMessage: "boom"}}
+	}
+
+	h.service.Register(Member{SourceID: "imbGZo", MediaGroupID: "gid-all-failed", ChatID: 42})
+	h.run(0)
+
+	if len(h.persisted) != len(messages) {
+		t.Fatalf("expected failure records to be persisted, got: %+v", h.persisted)
+	}
+	if len(h.schedules) != 2 {
+		t.Fatalf("expected a retry schedule after all-platform failure, got %d", len(h.schedules))
 	}
 }
 
@@ -365,6 +425,27 @@ func TestDeliver_RetriesWhenAlbumLoadFails(t *testing.T) {
 	h.run(1)
 	if len(h.dispatched) != 1 {
 		t.Fatalf("expected retry to deliver album, got %d", len(h.dispatched))
+	}
+}
+
+func TestDeliver_RetriesWhenDispatchReturnsNoResults(t *testing.T) {
+	setupAlbumTestDB(t)
+
+	channelDir := t.TempDir()
+	seedAlbumMessages(t, channelDir, "gid-no-results", 750, time.Now().Add(-time.Minute))
+
+	config := Entity.Config{}
+	config.Output.ChannelDir = channelDir
+	h := newAlbumTestHarness(config, &fakeMessageSender{})
+	h.service.dispatch = func(_ Entity.Config, _ syncservice.Payload) []syncservice.DispatchResult {
+		return nil
+	}
+
+	h.service.Register(Member{SourceID: "imbGZo", MediaGroupID: "gid-no-results", ChatID: 42})
+	h.run(0)
+
+	if len(h.schedules) != 2 {
+		t.Fatalf("expected retry schedule for empty dispatch results, got %d", len(h.schedules))
 	}
 }
 
@@ -469,5 +550,43 @@ func TestNew_ResolvesAlbumDebounceFromConfig(t *testing.T) {
 	config.SocialMediaSync.AlbumDebounceSeconds = -1
 	if got := New(nil, config).debounce; got != DefaultDebounce {
 		t.Fatalf("expected invalid debounce to fall back to default, got: %s", got)
+	}
+}
+
+func TestRegister_ConcurrentRegistrationAndFlushDoesNotRace(t *testing.T) {
+	setupAlbumTestDB(t)
+
+	channelDir := t.TempDir()
+	seedAlbumMessages(t, channelDir, "gid-concurrent", 800, time.Now().Add(-time.Minute))
+
+	config := Entity.Config{}
+	config.Output.ChannelDir = channelDir
+	config.SocialMediaSync.AlbumDebounceSeconds = 1
+
+	service := New(nil, config)
+	dispatched := make(chan struct{}, 1)
+	service.dispatch = func(_ Entity.Config, _ syncservice.Payload) []syncservice.DispatchResult {
+		select {
+		case dispatched <- struct{}{}:
+		default:
+		}
+		return []syncservice.DispatchResult{{Platform: "BlueSky", Success: true}}
+	}
+	service.persistResults = func(int64, []syncservice.DispatchResult) error { return nil }
+
+	var wg sync.WaitGroup
+	for i := 0; i < 40; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			service.Register(Member{SourceID: "imbGZo", MediaGroupID: "gid-concurrent", ChatID: 42, ArchivedMessageID: int64(i + 1)})
+		}(i)
+	}
+	wg.Wait()
+
+	select {
+	case <-dispatched:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("expected album dispatch after quiet window")
 	}
 }

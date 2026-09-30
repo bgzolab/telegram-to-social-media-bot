@@ -199,7 +199,7 @@ func TestListMessagesByMediaGroup_ReturnsMembersInSourceOrder(t *testing.T) {
 	}
 }
 
-func TestHasSyncRecordsForMediaGroup(t *testing.T) {
+func TestHasSuccessfulSyncRecordForMediaGroup(t *testing.T) {
 	setupTestDB(t)
 
 	messageID, err := SaveMessage(newAlbumTestMessage(101, "gid-2"))
@@ -207,12 +207,31 @@ func TestHasSyncRecordsForMediaGroup(t *testing.T) {
 		t.Fatalf("save album message should succeed, got err: %v", err)
 	}
 
-	synced, err := HasSyncRecordsForMediaGroup("imbGZo", "gid-2")
+	synced, err := HasSuccessfulSyncRecordForMediaGroup("imbGZo", "gid-2")
 	if err != nil {
 		t.Fatalf("query sync records should succeed, got err: %v", err)
 	}
 	if synced {
-		t.Fatalf("expected no sync records before dispatch")
+		t.Fatalf("expected no successful sync records before dispatch")
+	}
+
+	// 失败记录与手动重同步记录都不算已投递，自动路径仍应继续重试。
+	for _, record := range []Entity.SyncRecord{
+		{ArchivedMessageID: messageID, Platform: "BlueSky", Status: Entity.SyncStatusFailed, Trigger: Entity.SyncTriggerAutomatic},
+		{ArchivedMessageID: messageID, Platform: "Mastodon", Status: Entity.SyncStatusSucceeded, Trigger: Entity.SyncTriggerManual},
+	} {
+		record.CreatedTime = time.Now()
+		if _, err := SaveSyncRecord(&record); err != nil {
+			t.Fatalf("save sync record should succeed, got err: %v", err)
+		}
+	}
+
+	synced, err = HasSuccessfulSyncRecordForMediaGroup("imbGZo", "gid-2")
+	if err != nil {
+		t.Fatalf("query sync records should succeed, got err: %v", err)
+	}
+	if synced {
+		t.Fatalf("expected failed/manual records not to count as delivered")
 	}
 
 	if _, err := SaveSyncRecord(&Entity.SyncRecord{
@@ -225,15 +244,15 @@ func TestHasSyncRecordsForMediaGroup(t *testing.T) {
 		t.Fatalf("save sync record should succeed, got err: %v", err)
 	}
 
-	synced, err = HasSyncRecordsForMediaGroup("imbGZo", "gid-2")
+	synced, err = HasSuccessfulSyncRecordForMediaGroup("imbGZo", "gid-2")
 	if err != nil {
 		t.Fatalf("query sync records should succeed, got err: %v", err)
 	}
 	if !synced {
-		t.Fatalf("expected album to be recognized as synced")
+		t.Fatalf("expected album to be recognized as delivered")
 	}
 
-	other, err := HasSyncRecordsForMediaGroup("imbGZo", "gid-other")
+	other, err := HasSuccessfulSyncRecordForMediaGroup("imbGZo", "gid-other")
 	if err != nil {
 		t.Fatalf("query other group should succeed, got err: %v", err)
 	}
@@ -276,15 +295,34 @@ func TestListPendingMediaGroups(t *testing.T) {
 		t.Fatalf("save sync record should succeed, got err: %v", err)
 	}
 
+	// 失败记录不视为已投递：该分组仍应出现在待投递列表中。
+	failedID, err := SaveMessage(newAlbumTestMessage(206, "gid-failed"))
+	if err != nil {
+		t.Fatalf("save failed album message should succeed, got err: %v", err)
+	}
+	if _, err := SaveSyncRecord(&Entity.SyncRecord{
+		ArchivedMessageID: failedID,
+		Platform:          "BlueSky",
+		Status:            Entity.SyncStatusFailed,
+		Trigger:           Entity.SyncTriggerAutomatic,
+		CreatedTime:       time.Now(),
+	}); err != nil {
+		t.Fatalf("save failed sync record should succeed, got err: %v", err)
+	}
+
 	pending, err := ListPendingMediaGroups(recent.Add(-24 * time.Hour))
 	if err != nil {
 		t.Fatalf("list pending media groups should succeed, got err: %v", err)
 	}
-	if len(pending) != 1 {
-		t.Fatalf("expected 1 pending media group, got: %+v", pending)
+	if len(pending) != 2 {
+		t.Fatalf("expected 2 pending media groups, got: %+v", pending)
 	}
-	if pending[0].MediaGroupID != "gid-pending" || pending[0].Username != "imbGZo" {
-		t.Fatalf("unexpected pending group: %+v", pending[0])
+	byGroup := map[string]string{}
+	for _, group := range pending {
+		byGroup[group.MediaGroupID] = group.Username
+	}
+	if byGroup["gid-pending"] != "imbGZo" || byGroup["gid-failed"] != "imbGZo" {
+		t.Fatalf("unexpected pending groups: %+v", pending)
 	}
 }
 

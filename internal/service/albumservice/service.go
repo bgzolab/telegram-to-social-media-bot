@@ -7,6 +7,7 @@ package albumservice
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -97,7 +98,7 @@ func New(sender MessageSender, config Entity.Config) *Service {
 			return time.AfterFunc(delay, callback)
 		},
 		loadMessages: Database.ListMessagesByMediaGroup,
-		hasRecords:   Database.HasSyncRecordsForMediaGroup,
+		hasRecords:   Database.HasSuccessfulSyncRecordForMediaGroup,
 		loadPending:  Database.ListPendingMediaGroups,
 		dispatch: func(config Entity.Config, payload syncservice.Payload) []syncservice.DispatchResult {
 			return syncservice.Dispatch(config, payload, syncservice.DefaultSenders())
@@ -118,7 +119,7 @@ func resolveDebounce(config Entity.Config) time.Duration {
 }
 
 // Register 登记一条相册成员；静默窗口内出现新成员会顺延投递时间。
-// 已产生过同步记录的分组忽略迟到成员（只归档不重发），避免重复发帖。
+// 已成功自动投递过的分组忽略迟到成员（只归档不重发），避免重复发帖。
 func (s *Service) Register(member Member) {
 	if s == nil || member.MediaGroupID == "" || member.SourceID == "" {
 		return
@@ -138,7 +139,7 @@ func (s *Service) Register(member Member) {
 	s.schedule(key, member.ChatID, s.debounce, member.ArchivedMessageID)
 }
 
-// RecoverPending 在进程启动时恢复最近归档但未完成投递的相册分组。
+// RecoverPending 在进程启动时恢复最近归档但未完成自动投递的相册分组。
 // 这样做的原因是静默窗口定时器只存在于内存，重启会丢失仍未投递的分组；
 // 仍在窗口内的分组按剩余窗口调度，而不是直接跳过。
 func (s *Service) RecoverPending() {
@@ -159,7 +160,11 @@ func (s *Service) RecoverPending() {
 		}
 
 		messages, err := s.loadMessages(group.Username, group.MediaGroupID)
-		if err != nil || len(messages) == 0 {
+		if err != nil {
+			LogUtils.GetLogger().Printf("相册恢复加载失败: source=%s gid=%s err=%v\n", group.Username, group.MediaGroupID, err)
+			continue
+		}
+		if len(messages) == 0 {
 			continue
 		}
 
@@ -174,6 +179,9 @@ func (s *Service) RecoverPending() {
 
 // schedule 注册/刷新分组的定时器。同一分组重复注册会停止旧定时器并沿用已记录的成员集合。
 func (s *Service) schedule(key groupKey, chatID int64, delay time.Duration, archivedMessageID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	members := make(map[int64]struct{}, MaxAlbumSize)
 	if existing, ok := s.pending[key]; ok {
 		existing.timer.Stop()
@@ -189,23 +197,34 @@ func (s *Service) schedule(key groupKey, chatID int64, delay time.Duration, arch
 		delay = 0
 	}
 
-	s.replace(key, chatID, delay, members, 0, force)
+	s.replaceLocked(key, chatID, delay, members, 0, force)
 }
 
-// retry 在投递异常时按静默窗口重排定时器，超过尝试上限后放弃。
+// retry 在投递异常时按静默窗口重排定时器，超过尝试上限后放弃；已有更新的登记排队时不重复重排。
 func (s *Service) retry(group *pendingGroup, cause error) {
-	if group.attempts+1 >= maxDeliveryAttempts {
+	attempts := group.attempts + 1
+	if attempts >= maxDeliveryAttempts {
 		LogUtils.GetLogger().Printf("相册投递重试达到上限，放弃: source=%s gid=%s err=%v\n", group.key.sourceID, group.key.mediaGroupID, cause)
 		return
 	}
+
 	LogUtils.GetLogger().Printf("相册投递失败，等待重试: source=%s gid=%s err=%v\n", group.key.sourceID, group.key.mediaGroupID, cause)
-	s.replace(group.key, group.chatID, s.debounce, group.members, group.attempts+1, group.force)
+	s.replaceIfIdle(group, s.debounce, attempts)
 }
 
-func (s *Service) replace(key groupKey, chatID int64, delay time.Duration, members map[int64]struct{}, attempts int, force bool) {
+// replaceIfIdle 仅在分组当前没有更新登记排队时重排定时器，避免覆盖并发的 Register 结果。
+func (s *Service) replaceIfIdle(group *pendingGroup, delay time.Duration, attempts int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if _, exists := s.pending[group.key]; exists {
+		return
+	}
+	s.replaceLocked(group.key, group.chatID, delay, group.members, attempts, group.force)
+}
+
+// replaceLocked 持有 s.mu 时替换分组定时器。
+func (s *Service) replaceLocked(key groupKey, chatID int64, delay time.Duration, members map[int64]struct{}, attempts int, force bool) {
 	group := &pendingGroup{key: key, chatID: chatID, members: members, attempts: attempts, force: force}
 	group.timer = s.afterFunc(delay, func() {
 		s.flush(group)
@@ -229,11 +248,6 @@ func (s *Service) flush(group *pendingGroup) {
 
 // deliver 读取落库的相册成员，聚合文本与图片后统一投递，并把结果写入每个成员的同步记录。
 func (s *Service) deliver(group *pendingGroup) {
-	// 静默窗口期间可能已发生手动重同步，投递前再确认一次，避免重复发帖。
-	if synced, err := s.hasRecords(group.key.sourceID, group.key.mediaGroupID); err == nil && synced {
-		return
-	}
-
 	messages, err := s.loadMessages(group.key.sourceID, group.key.mediaGroupID)
 	if err != nil || len(messages) == 0 {
 		s.retry(group, err)
@@ -244,7 +258,7 @@ func (s *Service) deliver(group *pendingGroup) {
 	// 收满上限的分组已经完整，不受窗口检查影响。
 	if !group.force {
 		if remaining := s.debounce - s.now().Sub(latestCreatedTime(messages)); remaining > 0 {
-			s.replace(group.key, group.chatID, remaining, group.members, group.attempts, group.force)
+			s.replaceIfIdle(group, remaining, group.attempts)
 			return
 		}
 	}
@@ -257,10 +271,16 @@ func (s *Service) deliver(group *pendingGroup) {
 	}
 	defer syncservice.ReleaseAlbumDispatch(scope)
 
+	// 成功投递预检放在取得互斥之后，关闭“预检通过后手动重同步完成”的竞态窗口。
+	if synced, err := s.hasRecords(group.key.sourceID, group.key.mediaGroupID); err == nil && synced {
+		return
+	}
+
 	head := syncservice.AlbumHead(messages)
 	payload := syncservice.BuildPayloadWithImages(syncservice.AlbumText(messages), syncservice.CollectAlbumImagePaths(s.config, messages))
 	results := s.dispatch(s.config, payload)
 	if len(results) == 0 {
+		s.retry(group, errors.New("dispatch returned no results"))
 		return
 	}
 
@@ -271,6 +291,20 @@ func (s *Service) deliver(group *pendingGroup) {
 	}
 
 	s.notify(group.chatID, head.MessageUrl, len(payload.ImagePaths()), results)
+
+	// 全部平台失败时按上限重试；失败记录不参与“已成功投递”预检，重启恢复也能兜底。
+	if allResultsFailed(results) {
+		s.retry(group, errors.New("all platforms failed"))
+	}
+}
+
+func allResultsFailed(results []syncservice.DispatchResult) bool {
+	for _, result := range results {
+		if result.Success {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) notify(chatID int64, sourceLink string, imageCount int, results []syncservice.DispatchResult) {
@@ -285,6 +319,7 @@ func (s *Service) notify(chatID int64, sourceLink string, imageCount int, result
 
 	for _, target := range notifyservice.ResolveTargetChatIDs(s.config, chatID) {
 		if target == 0 {
+			LogUtils.GetLogger().Printf("相册同步通知缺少目标会话，已跳过: sourceLink=%s\n", sourceLink)
 			continue
 		}
 		for _, text := range texts {

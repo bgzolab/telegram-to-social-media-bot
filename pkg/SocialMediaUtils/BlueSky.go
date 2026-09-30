@@ -162,15 +162,6 @@ func buildBlueSkyReplyRef(rootURI, rootCID, parentURI, parentCID string) map[str
 	}
 }
 
-func buildBlueSkyPost(message string, imagePath string, bearerToken string) (map[string]any, error) {
-	var imagePaths []string
-	if imagePath != "" {
-		imagePaths = []string{imagePath}
-	}
-	post, _, err := buildBlueSkyPostWithImages(message, imagePaths, bearerToken, nil)
-	return post, err
-}
-
 // buildBlueSkyPostWithImages 构造帖子记录：文本 facets + 多图 embed + 可选线程回复引用。
 // 返回被跳过的图片数量：单张图片上传失败时跳过该图片，只有全部图片都失败才返回错误，
 // 交由上层决定降级为纯文本；部分失败会由调用方写入投递结果的错误信息。
@@ -246,7 +237,7 @@ func uploadBlueSkyBlob(imagePath string, bearerToken string) (map[string]any, er
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, os.ErrInvalid
+		return nil, fmt.Errorf("bluesky blob upload failed: %s", resp.Status)
 	}
 
 	var payload struct {
@@ -256,7 +247,7 @@ func uploadBlueSkyBlob(imagePath string, bearerToken string) (map[string]any, er
 		return nil, err
 	}
 	if payload.Blob == nil {
-		return nil, os.ErrInvalid
+		return nil, fmt.Errorf("bluesky blob upload returned empty blob")
 	}
 
 	return payload.Blob, nil

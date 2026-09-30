@@ -15,6 +15,16 @@ import (
 	"github.com/reiver/go-atproto/com/atproto/server"
 )
 
+// buildBlueSkyPostForTest 是单图/无图场景的测试辅助，统一走多图构建函数并忽略跳过计数。
+func buildBlueSkyPostForTest(message string, imagePath string) (map[string]any, error) {
+	var imagePaths []string
+	if imagePath != "" {
+		imagePaths = []string{imagePath}
+	}
+	post, _, err := buildBlueSkyPostWithImages(message, imagePaths, "token", nil)
+	return post, err
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -46,7 +56,7 @@ func TestBuildBlueSkyPost_WithImageEmbed(t *testing.T) {
 		blueSkyHTTPClient = originalClient
 	}()
 
-	post, err := buildBlueSkyPost("hello", imagePath, "token")
+	post, err := buildBlueSkyPostForTest("hello", imagePath)
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -77,7 +87,7 @@ func TestBuildBlueSkyPost_ReturnErrorWhenUploadFails(t *testing.T) {
 		blueSkyHTTPClient = originalClient
 	}()
 
-	_, err := buildBlueSkyPost("hello", imagePath, "token")
+	_, err := buildBlueSkyPostForTest("hello", imagePath)
 	if err == nil {
 		t.Fatalf("expected buildBlueSkyPost failure when upload fails")
 	}
@@ -86,7 +96,7 @@ func TestBuildBlueSkyPost_ReturnErrorWhenUploadFails(t *testing.T) {
 func TestBuildBlueSkyPost_AddsLinkFacets(t *testing.T) {
 	message := "read this https://example.com/path?x=1 and this https://bsky.app/profile/test"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -118,7 +128,7 @@ func TestBuildBlueSkyPost_AddsLinkFacets(t *testing.T) {
 func TestBuildBlueSkyPost_TrimsTrailingPunctuationFromLinkFacet(t *testing.T) {
 	message := "see https://example.com/test."
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -133,7 +143,7 @@ func TestBuildBlueSkyPost_TrimsTrailingPunctuationFromLinkFacet(t *testing.T) {
 func TestBuildBlueSkyPost_AddsTagFacets(t *testing.T) {
 	message := "hello #update #pm"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -174,7 +184,7 @@ func TestBuildBlueSkyPost_AddsTagFacets(t *testing.T) {
 func TestBuildBlueSkyPost_TagFacetUsesUTF8ByteOffsets(t *testing.T) {
 	message := "中文 #标签"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -201,7 +211,7 @@ func TestBuildBlueSkyPost_TagFacetUsesUTF8ByteOffsets(t *testing.T) {
 func TestBuildBlueSkyPost_SkipsInvalidTagFacets(t *testing.T) {
 	message := "#123 #1_2 #update2026"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -220,7 +230,7 @@ func TestBuildBlueSkyPost_SkipsInvalidTagFacets(t *testing.T) {
 func TestBuildBlueSkyPost_TrimsTrailingPunctuationFromTagFacet(t *testing.T) {
 	message := "hello #tag."
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -240,7 +250,7 @@ func TestBuildBlueSkyPost_TrimsTrailingPunctuationFromTagFacet(t *testing.T) {
 func TestBuildBlueSkyPost_CombinesLinkAndTagFacets(t *testing.T) {
 	message := "see https://example.com/x #tag"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -264,7 +274,7 @@ func TestBuildBlueSkyPost_CombinesLinkAndTagFacets(t *testing.T) {
 func TestBuildBlueSkyPost_DoesNotTagURLFragments(t *testing.T) {
 	message := "see https://example.com/page#section"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -284,7 +294,7 @@ func TestBuildBlueSkyPost_SkipsTooLongTagFacet(t *testing.T) {
 	validTag := strings.Repeat("a", 64)
 	message := "#" + validTag + " #" + strings.Repeat("b", 65)
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -303,7 +313,7 @@ func TestBuildBlueSkyPost_SkipsTooLongTagFacet(t *testing.T) {
 func TestBuildBlueSkyPost_StopsTagAtUnicodeWhitespace(t *testing.T) {
 	message := "#标签\u3000后续"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -327,7 +337,7 @@ func TestBuildBlueSkyPost_StopsTagAtUnicodeWhitespace(t *testing.T) {
 func TestBuildBlueSkyPost_StopsTagAtVerticalTab(t *testing.T) {
 	message := "#tag\x0Btail"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -351,7 +361,7 @@ func TestBuildBlueSkyPost_StopsTagAtVerticalTab(t *testing.T) {
 func TestBuildBlueSkyPost_TagFacetWithFullWidthHash(t *testing.T) {
 	message := "＃中文"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -378,7 +388,7 @@ func TestBuildBlueSkyPost_TagFacetWithFullWidthHash(t *testing.T) {
 func TestBuildBlueSkyPost_SkipsKeycapEmoji(t *testing.T) {
 	message := "#️⃣ keycap"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
