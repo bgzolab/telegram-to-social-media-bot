@@ -137,6 +137,145 @@ func TestBackfillFromJSON_ImportsForwardedChannelMessage(t *testing.T) {
 	}
 }
 
+func TestBackfillFromJSON_PersistsMediaGroupID(t *testing.T) {
+	setupBackfillTestDB(t)
+	tmp := t.TempDir()
+	jsonRoot := filepath.Join(tmp, "json")
+	filePath := filepath.Join(jsonRoot, "20250330", "album.json")
+
+	writeUpdateJSON(t, filePath, models.Update{
+		Message: &models.Message{
+			ID:           74,
+			Date:         1743239136,
+			MediaGroupID: "-3152699728800106388",
+			Chat:         models.Chat{ID: 845458984, Type: "private"},
+			Caption:      "相册第二张",
+			ForwardOrigin: &models.MessageOrigin{
+				Type: "channel",
+				MessageOriginChannel: &models.MessageOriginChannel{
+					Date:      1742742125,
+					MessageID: 100,
+					Chat:      models.Chat{ID: -1001, Username: "imbGZo"},
+				},
+			},
+		},
+	}, time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC))
+
+	stats, err := BackfillFromJSON(testConfig(jsonRoot))
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if stats.Inserted != 1 {
+		t.Fatalf("expected one insert, got stats: %+v", stats)
+	}
+
+	msg, err := Database.GetMessageBySource(100, "imbGZo")
+	if err != nil {
+		t.Fatalf("expected saved album message, got err: %v", err)
+	}
+	if msg.MediaGroupID != "-3152699728800106388" {
+		t.Fatalf("unexpected media group id: %s", msg.MediaGroupID)
+	}
+}
+
+func TestBackfillMediaGroupIDs_UpdatesExistingRowsOnly(t *testing.T) {
+	setupBackfillTestDB(t)
+	tmp := t.TempDir()
+	jsonRoot := filepath.Join(tmp, "json")
+
+	// 已入库但缺少分组ID的相册成员。
+	if _, err := Database.SaveMessage(&Entity.Message{
+		MessageID:   100,
+		Username:    "imbGZo",
+		Content:     "old member",
+		MessageDate: time.Unix(1742742125, 0),
+		CreatedTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed message should succeed, got err: %v", err)
+	}
+
+	// 已带分组ID的成员，应保持 Unchanged。
+	if _, err := Database.SaveMessage(&Entity.Message{
+		MessageID:    200,
+		Username:     "imbGZo",
+		Content:      "labeled member",
+		MediaGroupID: "gid-labeled",
+		MessageDate:  time.Unix(1742742126, 0),
+		CreatedTime:  time.Now(),
+	}); err != nil {
+		t.Fatalf("seed labeled message should succeed, got err: %v", err)
+	}
+
+	albumUpdate := func(sourceMessageID int) models.Update {
+		return models.Update{
+			Message: &models.Message{
+				ID:           sourceMessageID,
+				Date:         1743239136,
+				MediaGroupID: "gid-album",
+				Chat:         models.Chat{ID: 845458984, Type: "private"},
+				ForwardOrigin: &models.MessageOrigin{
+					Type: "channel",
+					MessageOriginChannel: &models.MessageOriginChannel{
+						Date:      1742742125,
+						MessageID: sourceMessageID + 100,
+						Chat:      models.Chat{ID: -1001, Username: "imbGZo"},
+					},
+				},
+			},
+		}
+	}
+
+	writeUpdateJSON(t, filepath.Join(jsonRoot, "20250330", "album.json"), albumUpdate(0), time.Now())
+	writeUpdateJSON(t, filepath.Join(jsonRoot, "20250330", "labeled.json"), models.Update{
+		Message: &models.Message{
+			ID:           201,
+			Date:         1743239137,
+			MediaGroupID: "gid-new",
+			Chat:         models.Chat{ID: 845458984, Type: "private"},
+			ForwardOrigin: &models.MessageOrigin{
+				Type: "channel",
+				MessageOriginChannel: &models.MessageOriginChannel{
+					Date:      1742742126,
+					MessageID: 200,
+					Chat:      models.Chat{ID: -1001, Username: "imbGZo"},
+				},
+			},
+		},
+	}, time.Now())
+	writeUpdateJSON(t, filepath.Join(jsonRoot, "20250330", "text.json"), models.Update{
+		Message: &models.Message{
+			ID:   300,
+			Date: 1743239138,
+			Chat: models.Chat{ID: 845458984, Type: "private"},
+			Text: "no album",
+		},
+	}, time.Now())
+
+	stats, err := BackfillMediaGroupIDs(testConfig(jsonRoot))
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if stats.Scanned != 3 || stats.WithGroup != 2 || stats.Updated != 1 || stats.Unchanged != 1 || stats.Skipped != 1 || stats.Failed != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	updated, err := Database.GetMessageBySource(100, "imbGZo")
+	if err != nil {
+		t.Fatalf("expected updated message, got err: %v", err)
+	}
+	if updated.MediaGroupID != "gid-album" {
+		t.Fatalf("unexpected backfilled media group id: %s", updated.MediaGroupID)
+	}
+
+	labeled, err := Database.GetMessageBySource(200, "imbGZo")
+	if err != nil {
+		t.Fatalf("expected labeled message, got err: %v", err)
+	}
+	if labeled.MediaGroupID != "gid-labeled" {
+		t.Fatalf("expected existing media group id to stay, got: %s", labeled.MediaGroupID)
+	}
+}
+
 func TestBackfillFromJSON_DuplicateMessagesAreCounted(t *testing.T) {
 	setupBackfillTestDB(t)
 	tmp := t.TempDir()

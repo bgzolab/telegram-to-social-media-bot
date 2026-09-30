@@ -31,6 +31,8 @@ type PersistResult struct {
 	SourceID          string
 	ImagePath         string
 	ArchivedMessageID int64
+	MediaGroupID      string // Telegram 相册分组ID，非相册消息为空
+	ChatID            int64  // 消息所在会话，供异步通知回退使用
 }
 
 // downloadFile 下载 Telegram 文件内容；测试可替换为 fake 以离线运行。
@@ -57,6 +59,8 @@ func PersistMessage(ctx context.Context, b *bot.Bot, update *models.Update, conf
 
 	meta := ResolveSourceMeta(update, config)
 	msgText := SelectMsgText(update)
+	mediaGroupID := strings.TrimSpace(update.Message.MediaGroupID)
+	chatID := update.Message.Chat.ID
 	meta.FileName = ResolveArchiveFileName(config, meta, msgText)
 	photoLink := ""
 	imagePath := ""
@@ -64,7 +68,7 @@ func PersistMessage(ctx context.Context, b *bot.Bot, update *models.Update, conf
 	existingArchivedMessageID := resolveArchivedMessageID(int64(meta.MessageID), meta.SourceID)
 
 	if meta.SourceLink != "" && isMessageArchived(meta) {
-		return PersistResult{OK: false, Message: "消息已存在", SourceLink: meta.SourceLink, MsgText: msgText, SourceID: meta.SourceID, ArchivedMessageID: existingArchivedMessageID}
+		return PersistResult{OK: false, Message: "消息已存在", SourceLink: meta.SourceLink, MsgText: msgText, SourceID: meta.SourceID, ArchivedMessageID: existingArchivedMessageID, MediaGroupID: mediaGroupID, ChatID: chatID}
 	}
 
 	if photos := extractPhotos(update); len(photos) > 0 {
@@ -99,50 +103,51 @@ func PersistMessage(ctx context.Context, b *bot.Bot, update *models.Update, conf
 
 	tmplData, err := os.ReadFile(config.Template.Dir)
 	if err != nil {
-		return PersistResult{OK: false, Message: fmt.Sprintf("读取模板失败, %v", err), SourceLink: meta.SourceLink, MsgText: msgText, SourceID: meta.SourceID, ImagePath: imagePath, ArchivedMessageID: existingArchivedMessageID}
+		return PersistResult{OK: false, Message: fmt.Sprintf("读取模板失败, %v", err), SourceLink: meta.SourceLink, MsgText: msgText, SourceID: meta.SourceID, ImagePath: imagePath, ArchivedMessageID: existingArchivedMessageID, MediaGroupID: mediaGroupID, ChatID: chatID}
 	}
 
 	tmpl, err := template.New("example").Parse(string(tmplData))
 	if err != nil {
-		return PersistResult{OK: false, Message: fmt.Sprintf("解析模板失败, %v", err), SourceLink: meta.SourceLink, MsgText: msgText, SourceID: meta.SourceID, ImagePath: imagePath, ArchivedMessageID: existingArchivedMessageID}
+		return PersistResult{OK: false, Message: fmt.Sprintf("解析模板失败, %v", err), SourceLink: meta.SourceLink, MsgText: msgText, SourceID: meta.SourceID, ImagePath: imagePath, ArchivedMessageID: existingArchivedMessageID, MediaGroupID: mediaGroupID, ChatID: chatID}
 	}
 
 	var buf bytes.Buffer
 	err = tmpl.Execute(&buf, data)
 	if err != nil {
-		return PersistResult{OK: false, Message: fmt.Sprintf("渲染模板失败, %v", err), SourceLink: meta.SourceLink, MsgText: msgText, SourceID: meta.SourceID, ImagePath: imagePath, ArchivedMessageID: existingArchivedMessageID}
+		return PersistResult{OK: false, Message: fmt.Sprintf("渲染模板失败, %v", err), SourceLink: meta.SourceLink, MsgText: msgText, SourceID: meta.SourceID, ImagePath: imagePath, ArchivedMessageID: existingArchivedMessageID, MediaGroupID: mediaGroupID, ChatID: chatID}
 	}
 	contentWithFrontMatter := strings.TrimLeft(buf.String(), "\n")
 
 	FileUtils.OutputString(meta.OutputPath, meta.FileName, contentWithFrontMatter)
 
-	savedMsg := BuildArchivedMessage(meta, msgText, archiveNow, assets)
+	savedMsg := BuildArchivedMessage(meta, msgText, archiveNow, assets, mediaGroupID)
 
 	messageID, err := Database.SaveMessage(&savedMsg)
 	if err != nil {
 		if Database.IsDuplicateMessageError(err) {
-			return PersistResult{OK: false, Message: "消息已存在", SourceLink: meta.SourceLink, MsgText: msgText, SourceID: meta.SourceID, ImagePath: imagePath, ArchivedMessageID: resolveArchivedMessageID(int64(meta.MessageID), meta.SourceID)}
+			return PersistResult{OK: false, Message: "消息已存在", SourceLink: meta.SourceLink, MsgText: msgText, SourceID: meta.SourceID, ImagePath: imagePath, ArchivedMessageID: resolveArchivedMessageID(int64(meta.MessageID), meta.SourceID), MediaGroupID: mediaGroupID, ChatID: chatID}
 		}
 
 		LogUtils.GetLogger().Println(err)
-		return PersistResult{OK: false, Message: fmt.Sprintf("消息入库失败: %v", err), SourceLink: meta.SourceLink, MsgText: msgText, SourceID: meta.SourceID, ImagePath: imagePath, ArchivedMessageID: existingArchivedMessageID}
+		return PersistResult{OK: false, Message: fmt.Sprintf("消息入库失败: %v", err), SourceLink: meta.SourceLink, MsgText: msgText, SourceID: meta.SourceID, ImagePath: imagePath, ArchivedMessageID: existingArchivedMessageID, MediaGroupID: mediaGroupID, ChatID: chatID}
 	}
 
 	LogUtils.GetLogger().Printf("Save successful with: %d\n", messageID)
-	return PersistResult{OK: true, Message: meta.FileName, SourceLink: meta.SourceLink, MsgText: msgText, SourceID: meta.SourceID, ImagePath: imagePath, ArchivedMessageID: messageID}
+	return PersistResult{OK: true, Message: meta.FileName, SourceLink: meta.SourceLink, MsgText: msgText, SourceID: meta.SourceID, ImagePath: imagePath, ArchivedMessageID: messageID, MediaGroupID: mediaGroupID, ChatID: chatID}
 }
 
 // BuildArchivedMessage 统一构造数据库消息对象，供实时归档和历史补录共同复用。
 // 这样做的原因是把消息字段映射规则固定在单点，避免不同入口写出不一致的数据库记录。
-func BuildArchivedMessage(meta SourceMeta, msgText string, archiveTime time.Time, assets []Entity.Attachment) Entity.Message {
+func BuildArchivedMessage(meta SourceMeta, msgText string, archiveTime time.Time, assets []Entity.Attachment, mediaGroupID string) Entity.Message {
 	return Entity.Message{
 		Content: msgText,
 
-		MessageID:   int64(meta.MessageID),
-		Username:    meta.SourceID,
-		MessageUrl:  meta.SourceLink,
-		MessageDate: meta.SourceDate,
-		Attachments: assets,
+		MessageID:    int64(meta.MessageID),
+		Username:     meta.SourceID,
+		MessageUrl:   meta.SourceLink,
+		MessageDate:  meta.SourceDate,
+		MediaGroupID: strings.TrimSpace(mediaGroupID),
+		Attachments:  assets,
 
 		CreatedTime: archiveTime,
 	}
