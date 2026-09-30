@@ -319,6 +319,57 @@ func TestBuildBlueSkyPost_StopsTagAtUnicodeWhitespace(t *testing.T) {
 	}
 }
 
+func TestBuildBlueSkyPost_StopsTagAtVerticalTab(t *testing.T) {
+	message := "#tag\x0Btail"
+
+	post, err := buildBlueSkyPost(message, "", "token")
+	if err != nil {
+		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
+	}
+
+	facets := post["facets"].([]map[string]any)
+	if len(facets) != 1 {
+		t.Fatalf("expected 1 facet, got: %d", len(facets))
+	}
+
+	features := facets[0]["features"].([]map[string]any)
+	if features[0]["tag"] != "tag" {
+		t.Fatalf("unexpected facet tag: %#v", features[0]["tag"])
+	}
+
+	index := facets[0]["index"].(map[string]any)
+	if index["byteEnd"] != len("#tag") {
+		t.Fatalf("expected the vertical tab outside the facet range, got: %#v", index)
+	}
+}
+
+func TestBuildBlueSkyPost_TagFacetWithFullWidthHash(t *testing.T) {
+	message := "＃中文"
+
+	post, err := buildBlueSkyPost(message, "", "token")
+	if err != nil {
+		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
+	}
+
+	facets := post["facets"].([]map[string]any)
+	if len(facets) != 1 {
+		t.Fatalf("expected 1 facet, got: %d", len(facets))
+	}
+
+	features := facets[0]["features"].([]map[string]any)
+	if features[0]["tag"] != "中文" {
+		t.Fatalf("unexpected facet tag: %#v", features[0]["tag"])
+	}
+
+	index := facets[0]["index"].(map[string]any)
+	if index["byteStart"] != 0 {
+		t.Fatalf("expected byteStart 0, got: %#v", index)
+	}
+	if index["byteEnd"] != len("＃中文") {
+		t.Fatalf("expected byteEnd %d, got: %#v", len("＃中文"), index)
+	}
+}
+
 func TestBuildBlueSkyPost_SkipsKeycapEmoji(t *testing.T) {
 	message := "#️⃣ keycap"
 

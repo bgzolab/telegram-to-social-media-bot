@@ -29,7 +29,8 @@ var blueSkyURLRegexp = regexp.MustCompile(`https?://[^\s]+`)
 
 // blueSkyTagRegexp 对齐官方客户端 @atproto/api 的 TAG_REGEX：
 // hashtag 前缀必须是行首或空白，body 排除空白与零宽字符。
-var blueSkyTagRegexp = regexp.MustCompile(`(?:^|[\s\p{Z}])([#\x{FF03}])([^\s\p{Z}\x{00AD}\x{2060}\x{200A}-\x{200D}\x{20E2}]+)`)
+// 空白类与 JS 的 \s 等价（Go 的 \s 不含 \v 与 BOM，需显式补上）。
+var blueSkyTagRegexp = regexp.MustCompile(`(?:^|[\s\p{Z}\x{000B}\x{FEFF}])([#\x{FF03}])([^\s\p{Z}\x{000B}\x{FEFF}\x{00AD}\x{2060}\x{200A}-\x{200D}\x{20E2}]+)`)
 
 func initBlueSky(config Entity.Config) (username string, password string) {
 	BlueSky := config.SocialMediaSync.BlueSky
@@ -283,6 +284,7 @@ func buildBlueSkyTagFacets(message string) []map[string]any {
 
 // isValidBlueSkyTag 对齐官方客户端校验：至少包含一个非数字、非标点字符，
 // 且满足 tag 词法约束（64 graphemes / 640 bytes），避免生成被 PDS 拒绝的 facet。
+// 空白与零宽字符由 blueSkyTagRegexp 的 body 字符类排除，不在此重复维护。
 func isValidBlueSkyTag(tag string) bool {
 	if tag == "" || len(tag) > blueSkyTagMaxBytes {
 		return false
@@ -292,11 +294,7 @@ func isValidBlueSkyTag(tag string) bool {
 	}
 
 	for _, r := range tag {
-		if (r >= '0' && r <= '9') || unicode.IsSpace(r) || unicode.IsPunct(r) {
-			continue
-		}
-		switch r {
-		case '\u00AD', '\u2060', '\u200A', '\u200B', '\u200C', '\u200D', '\u20E2':
+		if (r >= '0' && r <= '9') || unicode.IsPunct(r) {
 			continue
 		}
 		return true
