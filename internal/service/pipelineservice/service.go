@@ -8,6 +8,7 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"telegram-message-sync-bot/internal/Entity"
+	"telegram-message-sync-bot/internal/service/albumservice"
 	"telegram-message-sync-bot/internal/service/archiveservice"
 	"telegram-message-sync-bot/internal/service/notifyservice"
 	"telegram-message-sync-bot/internal/service/syncservice"
@@ -59,14 +60,32 @@ func (defaultArchiveStage) Run(ctx context.Context, b *bot.Bot, update *models.U
 	return archiveservice.PersistMessage(ctx, b, update, config)
 }
 
-type defaultSyncStage struct{}
+// AlbumRegistrar 是同步阶段登记相册成员所需的最小接口，由 albumservice.Service 实现。
+// 这样做的原因是让 pipeline 只依赖“登记”语义，便于测试注入替身。
+type AlbumRegistrar interface {
+	Register(member albumservice.Member)
+}
+
+type defaultSyncStage struct {
+	albums AlbumRegistrar
+}
 
 var defaultSendersFactory = syncservice.DefaultSenders
 
-func (defaultSyncStage) Run(config Entity.Config, persistResult archiveservice.PersistResult) (bool, string, []syncservice.DispatchResult) {
+func (s defaultSyncStage) Run(config Entity.Config, persistResult archiveservice.PersistResult) (bool, string, []syncservice.DispatchResult) {
 	syncEnabled, syncReason := syncservice.ShouldSync(config, persistResult.SourceID)
 	results := make([]syncservice.DispatchResult, 0)
 	if syncEnabled {
+		// 相册成员不在到达时即时投递，先登记分组，等静默窗口到期后由 albumservice 聚合投递一次。
+		if persistResult.MediaGroupID != "" && s.albums != nil {
+			s.albums.Register(albumservice.Member{
+				SourceID:     persistResult.SourceID,
+				MediaGroupID: persistResult.MediaGroupID,
+				ChatID:       persistResult.ChatID,
+			})
+			return syncEnabled, syncReason, results
+		}
+
 		payload := syncservice.BuildPayload(persistResult.MsgText, syncservice.ResolvePayloadImagePath(config, persistResult.ImagePath))
 		results = syncservice.Dispatch(config, payload, defaultSendersFactory())
 		if err := syncservice.PersistDispatchResults(persistResult.ArchivedMessageID, results, syncservice.DispatchTriggerAutomatic); err != nil {
@@ -87,10 +106,10 @@ func (defaultNotifyStage) Run(config Entity.Config, update *models.Update, persi
 
 // NewDefaultPipeline 构建默认串行 pipeline：archive -> sync -> notify。
 // 这样做的原因是把主流程编排集中到单点，main 只保留入口与发送动作。
-func NewDefaultPipeline() Pipeline {
+func NewDefaultPipeline(albums AlbumRegistrar) Pipeline {
 	return Pipeline{
 		ArchiveStage: defaultArchiveStage{},
-		SyncStage:    defaultSyncStage{},
+		SyncStage:    defaultSyncStage{albums: albums},
 		NotifyStage:  defaultNotifyStage{},
 		Mode:         ExecutionModeSerial,
 	}

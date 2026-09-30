@@ -10,6 +10,7 @@ import (
 	"strings"
 	"telegram-message-sync-bot/internal/Entity"
 	"telegram-message-sync-bot/internal/Handler"
+	"telegram-message-sync-bot/internal/service/albumservice"
 	"telegram-message-sync-bot/internal/service/archivemigrationservice"
 	"telegram-message-sync-bot/internal/service/attachmentmigrationservice"
 	"telegram-message-sync-bot/internal/service/bootstrapservice"
@@ -26,6 +27,9 @@ import (
 
 // 全局配置
 var globalConfig Entity.Config
+
+// 相册聚合服务：start() 完成装配后供默认 handler 登记相册成员。
+var globalAlbumService *albumservice.Service
 
 const unauthorizedText = "无权限"
 
@@ -50,6 +54,10 @@ func start(botToken string) {
 	if err != nil {
 		LogUtils.GetLogger().Fatal(err)
 	}
+
+	// 相册聚合同步依赖消息已归档入库，因此放在 bot 装配完成后初始化，并立即恢复重启前未投递的分组。
+	globalAlbumService = albumservice.New(b, globalConfig)
+	globalAlbumService.RecoverPending()
 
 	_, err = b.SetMyCommands(ctx, &bot.SetMyCommandsParams{
 		Commands: []models.BotCommand{
@@ -76,7 +84,7 @@ func defalutHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		persistJSON(update)
 	}
 
-	pipeline := pipelineservice.NewDefaultPipeline()
+	pipeline := pipelineservice.NewDefaultPipeline(globalAlbumService)
 	pipeline.SetExecutionMode(pipelineservice.ResolveExecutionMode(globalConfig))
 	result := pipeline.ProcessUpdate(ctx, b, update, globalConfig)
 
@@ -425,6 +433,35 @@ func buildRootCommand() *cobra.Command {
 		},
 	}
 
+	var cmdMigrateMediaGroups = &cobra.Command{
+		Use:   "media-groups",
+		Short: "Backfill media_group_id for archived messages from JSON",
+		Long:  `Backfill media_group_id for archived messages from JSON.`,
+		Args:  cobra.MinimumNArgs(0),
+		Run: func(cmd *cobra.Command, args []string) {
+			cfg, err := bootstrapservice.LoadConfig(configFile)
+			if err != nil {
+				fmt.Printf("加载配置失败: %v\n", err)
+				return
+			}
+
+			err = bootstrapservice.InitRuntime(cfg)
+			if err != nil {
+				fmt.Printf("初始化运行时失败: %v\n", err)
+				LogUtils.GetLogger().Println(err)
+				return
+			}
+
+			stats, err := jsonbackfillservice.BackfillMediaGroupIDs(cfg)
+			if err != nil {
+				fmt.Printf("相册分组回填失败: %v\n", err)
+				return
+			}
+
+			fmt.Printf("相册分组回填完成: %+v\n", stats)
+		},
+	}
+
 	var cmdMigrateAttachmentsToR2 = &cobra.Command{
 		Use:   "attachments-to-r2",
 		Short: "Upload image attachments to Cloudflare R2 and rewrite Markdown",
@@ -475,10 +512,17 @@ func buildRootCommand() *cobra.Command {
 		return cmdMigrate
 	}
 
+	cmdMigrateMediaGroups.Flags().StringVarP(&configFile, "config", "c", "./config/config.yaml", "config for bot.")
+	err = cmdMigrateMediaGroups.MarkFlagRequired("config")
+	if err != nil {
+		return cmdMigrate
+	}
+
 	cmdMigrate.AddCommand(cmdMigrateBackfill)
 	cmdMigrate.AddCommand(cmdMigrateJSONToDB)
 	cmdMigrate.AddCommand(cmdMigrateAttachmentsToR2)
 	cmdMigrate.AddCommand(cmdMigrateMoveLegacy)
+	cmdMigrate.AddCommand(cmdMigrateMediaGroups)
 
 	cmdSync.Flags().StringVarP(&configFile, "config", "c", "./config/config.yaml", "config for bot.")
 	err = cmdSync.MarkFlagRequired("config")

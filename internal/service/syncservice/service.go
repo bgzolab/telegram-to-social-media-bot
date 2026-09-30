@@ -16,8 +16,35 @@ type ImagePayload struct {
 }
 
 type Payload struct {
-	Text  string
-	Image *ImagePayload
+	Text   string
+	Image  *ImagePayload
+	Images []ImagePayload
+}
+
+// ImagePaths 返回载荷内去重后的图片路径列表，兼容单图与多图两种装配方式。
+func (p Payload) ImagePaths() []string {
+	paths := make([]string, 0, 1+len(p.Images))
+	seen := make(map[string]struct{}, 1+len(p.Images))
+
+	appendPath := func(path string) {
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+
+	if p.Image != nil {
+		appendPath(p.Image.FilePath)
+	}
+	for _, image := range p.Images {
+		appendPath(image.FilePath)
+	}
+
+	return paths
 }
 
 type Sender interface {
@@ -54,6 +81,22 @@ func BuildPayload(text string, imagePath string) Payload {
 	}
 
 	payload.Image = &ImagePayload{FilePath: imagePath}
+	return payload
+}
+
+// BuildPayloadWithImages 构造多图载荷，自动过滤不存在的本地文件。
+// 这样做的原因是相册聚合落库与文件下载之间存在时间差，缺失文件时仍应保留文本投递。
+func BuildPayloadWithImages(text string, imagePaths []string) Payload {
+	payload := Payload{Text: StrUtils.UnescapeHashtags(text)}
+	for _, imagePath := range imagePaths {
+		if imagePath == "" {
+			continue
+		}
+		if _, err := os.Stat(imagePath); err != nil {
+			continue
+		}
+		payload.Images = append(payload.Images, ImagePayload{FilePath: imagePath})
+	}
 	return payload
 }
 

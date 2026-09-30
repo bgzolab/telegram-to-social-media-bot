@@ -64,14 +64,28 @@ func ManualResync(config Entity.Config, archivedMessageID int64, platform string
 	}
 	defer manualDispatchGuard.Release(guardKey)
 
-	imagePath := ResolvePayloadImagePath(config, firstImagePath(msg.Attachments))
-	payload := BuildPayload(msg.Content, imagePath)
+	messages := resyncAlbumMessages(msg)
+	payload := BuildPayloadWithImages(AlbumText(messages), CollectAlbumImagePaths(config, messages))
 	results := Dispatch(config, payload, senders)
 	if err := PersistDispatchResults(archivedMessageID, results, DispatchTriggerManual); err != nil {
 		return ManualResyncResult{}, err
 	}
 
 	return ManualResyncResult{Requested: true, Results: results}, nil
+}
+
+// resyncAlbumMessages 返回手动重同步实际要处理的成员集合：相册成员聚合整组，普通消息只处理自身。
+// 这样做的原因是相册成员单独重同步会产生只含一张图的残缺帖子。
+func resyncAlbumMessages(msg *Entity.Message) []Entity.Message {
+	if msg == nil || msg.MediaGroupID == "" {
+		return []Entity.Message{*msg}
+	}
+
+	group, err := Database.ListMessagesByMediaGroup(msg.Username, msg.MediaGroupID)
+	if err != nil || len(group) == 0 {
+		return []Entity.Message{*msg}
+	}
+	return group
 }
 
 func resolveManualSenders(platform string) ([]Sender, error) {
@@ -105,13 +119,4 @@ func NormalizePlatform(platform string) string {
 	default:
 		return platform
 	}
-}
-
-func firstImagePath(attachments []Entity.Attachment) string {
-	for _, attachment := range attachments {
-		if attachment.Type == Entity.ImageMessage {
-			return attachment.FilePath
-		}
-	}
-	return ""
 }

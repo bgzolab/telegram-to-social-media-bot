@@ -59,15 +59,27 @@ func SendTwitterWithImage(globalConfig Entity.Config, Message string, imagePath 
 	return SendTwitterWithImageDetailed(globalConfig, Message, imagePath).Success
 }
 
+func SendTwitterWithImages(globalConfig Entity.Config, Message string, imagePaths []string) bool {
+	return SendTwitterWithImagesDetailed(globalConfig, Message, imagePaths).Success
+}
+
 func SendTwitterDetailed(globalConfig Entity.Config, message string) PublishResult {
-	return sendTwitterPostDetailed(globalConfig, message, "")
+	return sendTwitterImagesPostDetailed(globalConfig, message, nil)
 }
 
 func SendTwitterWithImageDetailed(globalConfig Entity.Config, message string, imagePath string) PublishResult {
-	return sendTwitterPostDetailed(globalConfig, message, imagePath)
+	if imagePath == "" {
+		return sendTwitterImagesPostDetailed(globalConfig, message, nil)
+	}
+	return sendTwitterImagesPostDetailed(globalConfig, message, []string{imagePath})
 }
 
-func sendTwitterPostDetailed(globalConfig Entity.Config, message string, imagePath string) PublishResult {
+// SendTwitterWithImagesDetailed 发布“文本 + 多图”推文；超过单帖上限的图片按回复线程续发。
+func SendTwitterWithImagesDetailed(globalConfig Entity.Config, message string, imagePaths []string) PublishResult {
+	return sendTwitterImagesPostDetailed(globalConfig, message, imagePaths)
+}
+
+func sendTwitterImagesPostDetailed(globalConfig Entity.Config, message string, imagePaths []string) PublishResult {
 	// 提前返回结果失败
 	if globalConfig.SocialMediaSync.Twitter.Enable == false {
 		log.Println("Twitter is not enabled in the configuration.")
@@ -87,34 +99,71 @@ func sendTwitterPostDetailed(globalConfig Entity.Config, message string, imagePa
 		return PublishResult{ErrorMessage: err.Error()}
 	}
 
-	p := &manageTweetTypes.CreateInput{
-		Text: gotwi.String(message),
+	chunks := chunkImagePaths(imagePaths, maxImagesPerPost)
+	if len(chunks) == 0 {
+		chunks = [][]string{nil}
 	}
 
-	if imagePath != "" {
-		mediaID, err := uploadTwitterImage(c, imagePath)
+	result := PublishResult{}
+	var lastTweetID string
+	for index, chunk := range chunks {
+		p := &manageTweetTypes.CreateInput{}
+		if index == 0 {
+			p.Text = gotwi.String(message)
+		}
+		if lastTweetID != "" {
+			p.Reply = &manageTweetTypes.CreateInputReply{InReplyToTweetID: lastTweetID}
+		}
+
+		uploadErr := error(nil)
+		for _, imagePath := range chunk {
+			mediaID, err := uploadTwitterImage(c, imagePath)
+			if err != nil {
+				fmt.Println(err)
+				uploadErr = err
+				continue
+			}
+			if p.Media == nil {
+				p.Media = &manageTweetTypes.CreateInputMedia{}
+			}
+			p.Media.MediaIDs = append(p.Media.MediaIDs, mediaID)
+		}
+		// 首帖图片全部上传失败时保留原有降级语义：交给上层改为纯文本发送。
+		if index == 0 && len(chunk) > 0 && p.Media == nil {
+			return PublishResult{ErrorMessage: describeTwitterUploadError(uploadErr)}
+		}
+		if index > 0 && p.Media == nil {
+			result.ErrorMessage = fmt.Sprintf("后续图片线程发布失败: %s", describeTwitterUploadError(uploadErr))
+			break
+		}
+
+		res, err := twitterCreateTweet(c, p)
 		if err != nil {
-			fmt.Println(err)
-			return PublishResult{ErrorMessage: err.Error()}
+			fmt.Println(err.Error())
+			if index == 0 {
+				return PublishResult{ErrorMessage: err.Error()}
+			}
+			result.ErrorMessage = fmt.Sprintf("后续图片线程发布失败: %v", err)
+			break
 		}
-		p.Media = &manageTweetTypes.CreateInputMedia{
-			MediaIDs: []string{mediaID},
+
+		remoteID := gotwi.StringValue(res.Data.ID)
+		if index == 0 {
+			result.Success = true
+			result.RemoteID = remoteID
+			result.RemoteURL = fmt.Sprintf("https://twitter.com/i/web/status/%s", remoteID)
 		}
+		lastTweetID = remoteID
 	}
 
-	res, err := twitterCreateTweet(c, p)
-	if err != nil {
-		fmt.Println(err.Error())
-		return PublishResult{ErrorMessage: err.Error()}
-	}
+	return result
+}
 
-	remoteID := gotwi.StringValue(res.Data.ID)
-	fmt.Printf("[%s] %s\n", remoteID, gotwi.StringValue(res.Data.Text))
-	return PublishResult{
-		Success:   true,
-		RemoteID:  remoteID,
-		RemoteURL: fmt.Sprintf("https://twitter.com/i/web/status/%s", remoteID),
+func describeTwitterUploadError(err error) string {
+	if err == nil {
+		return "图片上传失败"
 	}
+	return err.Error()
 }
 
 func uploadTwitterImage(client gotwi.IClient, imagePath string) (string, error) {

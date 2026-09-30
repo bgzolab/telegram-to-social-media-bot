@@ -87,3 +87,38 @@ func TestBuildOutboundMessages(t *testing.T) {
 		t.Fatalf("unexpected fourth msg: %+v", msgs[3])
 	}
 }
+
+func TestBuildAlbumSyncNotifications_AddsSourceAndImageCount(t *testing.T) {
+	results := []syncservice.DispatchResult{
+		{Platform: "BlueSky", Success: true, ImageRequested: true, UsedImage: true},
+		{Platform: "Twitter", Success: false, ErrorMessage: "too long"},
+	}
+
+	notifications := BuildAlbumSyncNotifications("https://t.me/imbGZo/100", 3, results)
+	if len(notifications) != 2 {
+		t.Fatalf("unexpected notifications: %+v", notifications)
+	}
+	expectedFirst := "https://t.me/imbGZo/100\n相册消息（3 张图）\n消息已同步至 BlueSky，并附带图片!"
+	if notifications[0] != expectedFirst {
+		t.Fatalf("unexpected first notification: %s", notifications[0])
+	}
+	if notifications[1] != "https://t.me/imbGZo/100\n相册消息（3 张图）\n同步 Twitter 失败: too long" {
+		t.Fatalf("unexpected second notification: %s", notifications[1])
+	}
+}
+
+func TestBuildAlbumSyncNotifications_WithoutSourceOrImages(t *testing.T) {
+	results := []syncservice.DispatchResult{{Platform: "Mastodon", Success: true}}
+
+	notifications := BuildAlbumSyncNotifications("", 0, results)
+	if len(notifications) != 1 {
+		t.Fatalf("unexpected notifications: %+v", notifications)
+	}
+	if notifications[0] != "相册消息\n消息已同步至 Mastodon!" {
+		t.Fatalf("unexpected notification: %s", notifications[0])
+	}
+
+	if empty := BuildAlbumSyncNotifications("link", 1, nil); len(empty) != 0 {
+		t.Fatalf("expected no notifications without results, got: %+v", empty)
+	}
+}

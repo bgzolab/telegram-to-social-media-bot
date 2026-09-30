@@ -15,6 +15,7 @@ import (
 
 	"telegram-message-sync-bot/internal/Database"
 	"telegram-message-sync-bot/internal/Entity"
+	"telegram-message-sync-bot/internal/service/albumservice"
 	"telegram-message-sync-bot/internal/service/archiveservice"
 	"telegram-message-sync-bot/internal/service/notifyservice"
 	"telegram-message-sync-bot/internal/service/syncservice"
@@ -115,7 +116,7 @@ func TestProcessUpdate_WhenSyncDisabled_StillNotify(t *testing.T) {
 }
 
 func TestProcessUpdate_NilUpdate_ReturnEmpty(t *testing.T) {
-	p := NewDefaultPipeline()
+	p := NewDefaultPipeline(nil)
 	result := p.ProcessUpdate(context.Background(), nil, nil, Entity.Config{})
 	if result.PersistResult.OK {
 		t.Fatalf("expected empty result when update is nil")
@@ -383,5 +384,73 @@ func TestDefaultSyncStage_PersistDispatchResults(t *testing.T) {
 	}
 	if records[0].Platform != "capture" || records[0].Status != Entity.SyncStatusSucceeded {
 		t.Fatalf("unexpected persisted sync record: %+v", records[0])
+	}
+}
+
+type fakeAlbumRegistrar struct {
+	members []albumservice.Member
+}
+
+func (f *fakeAlbumRegistrar) Register(member albumservice.Member) {
+	f.members = append(f.members, member)
+}
+
+func TestDefaultSyncStage_AlbumMemberDefersToAlbumRegistrar(t *testing.T) {
+	registrar := &fakeAlbumRegistrar{}
+	sender := &captureSender{}
+	originalFactory := defaultSendersFactory
+	defaultSendersFactory = func() []syncservice.Sender {
+		return []syncservice.Sender{sender}
+	}
+	defer func() {
+		defaultSendersFactory = originalFactory
+	}()
+
+	config := Entity.Config{}
+	config.SocialMediaSync.Enable = true
+	config.SocialMediaSync.TargetChannel = []string{"imbGZo"}
+
+	stage := defaultSyncStage{albums: registrar}
+	enabled, reason, results := stage.Run(config, archiveservice.PersistResult{
+		SourceID:     "imbGZo",
+		MsgText:      "album caption",
+		MediaGroupID: "gid-1",
+		ChatID:       -1001,
+	})
+
+	if !enabled {
+		t.Fatalf("expected sync enabled for album member, reason: %s", reason)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected no immediate dispatch results, got: %+v", results)
+	}
+	if sender.payload.Text != "" {
+		t.Fatalf("expected immediate dispatch to be skipped, got: %+v", sender.payload)
+	}
+	if len(registrar.members) != 1 {
+		t.Fatalf("expected album member registration, got: %+v", registrar.members)
+	}
+	member := registrar.members[0]
+	if member.SourceID != "imbGZo" || member.MediaGroupID != "gid-1" || member.ChatID != -1001 {
+		t.Fatalf("unexpected album member: %+v", member)
+	}
+}
+
+func TestDefaultSyncStage_AlbumMemberSkipsWhenSyncDisabled(t *testing.T) {
+	registrar := &fakeAlbumRegistrar{}
+	config := Entity.Config{}
+	config.SocialMediaSync.Enable = false
+
+	stage := defaultSyncStage{albums: registrar}
+	enabled, _, _ := stage.Run(config, archiveservice.PersistResult{
+		SourceID:     "imbGZo",
+		MediaGroupID: "gid-1",
+	})
+
+	if enabled {
+		t.Fatalf("expected sync disabled when social sync is off")
+	}
+	if len(registrar.members) != 0 {
+		t.Fatalf("expected no album registration when sync disabled, got: %+v", registrar.members)
 	}
 }

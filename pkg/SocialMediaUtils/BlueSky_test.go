@@ -8,6 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"telegram-message-sync-bot/internal/Entity"
+
+	"github.com/reiver/go-atproto/com/atproto/repo"
+	"github.com/reiver/go-atproto/com/atproto/server"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -380,5 +385,141 @@ func TestBuildBlueSkyPost_SkipsKeycapEmoji(t *testing.T) {
 
 	if facets, ok := post["facets"]; ok {
 		t.Fatalf("expected no facets for keycap emoji, got: %#v", facets)
+	}
+}
+
+func writeTestImages(t *testing.T, count int) []string {
+	t.Helper()
+
+	root := t.TempDir()
+	paths := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		path := filepath.Join(root, fmt.Sprintf("image-%d.png", i))
+		if err := os.WriteFile(path, []byte("png-data"), 0o644); err != nil {
+			t.Fatalf("failed to create test image: %v", err)
+		}
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+func stubBlueSkyBlobUpload(t *testing.T) {
+	t.Helper()
+
+	originalClient := blueSkyHTTPClient
+	blueSkyHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"blob":{"$type":"blob","mimeType":"image/png","size":8}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	t.Cleanup(func() {
+		blueSkyHTTPClient = originalClient
+	})
+}
+
+func TestBuildBlueSkyPostWithImages_EmbedsAllImages(t *testing.T) {
+	stubBlueSkyBlobUpload(t)
+	imagePaths := writeTestImages(t, 3)
+
+	post, err := buildBlueSkyPostWithImages("albums", imagePaths, "token", nil)
+	if err != nil {
+		t.Fatalf("expected build success, got: %v", err)
+	}
+
+	embed := post["embed"].(map[string]any)
+	images := embed["images"].([]map[string]any)
+	if len(images) != 3 {
+		t.Fatalf("expected 3 embedded images, got %d", len(images))
+	}
+	if _, exists := post["reply"]; exists {
+		t.Fatalf("expected no reply ref for standalone post")
+	}
+}
+
+func TestBuildBlueSkyPostWithImages_AddsReplyRef(t *testing.T) {
+	imagePaths := writeTestImages(t, 1)
+
+	reply := map[string]any{
+		"root":   map[string]any{"uri": "at://root", "cid": "cid-root"},
+		"parent": map[string]any{"uri": "at://parent", "cid": "cid-parent"},
+	}
+	post, err := buildBlueSkyPostWithImages("", nil, "token", reply)
+	if err != nil {
+		t.Fatalf("expected build success, got: %v", err)
+	}
+
+	storedReply := post["reply"].(map[string]any)
+	root := storedReply["root"].(map[string]any)
+	if root["uri"] != "at://root" {
+		t.Fatalf("unexpected root ref: %+v", storedReply)
+	}
+	if imagePaths == nil {
+		t.Fatalf("expected test images to exist")
+	}
+}
+
+func TestSendBlueSkyWithImagesDetailed_ThreadsOverLimitImages(t *testing.T) {
+	stubBlueSkyBlobUpload(t)
+
+	originalSession := blueSkyCreateSession
+	originalRecord := blueSkyCreateRecord
+	defer func() {
+		blueSkyCreateSession = originalSession
+		blueSkyCreateRecord = originalRecord
+	}()
+
+	blueSkyCreateSession = func(dst any, identifier string, password string) error {
+		session := dst.(*server.CreateSessionResponse)
+		session.AccessJWT = "token"
+		session.DID = "did:plc:test"
+		return nil
+	}
+
+	records := make([]map[string]any, 0, 2)
+	blueSkyCreateRecord = func(dst any, bearerToken string, repoName string, collection string, record any) error {
+		records = append(records, record.(map[string]any))
+		response := dst.(*repo.CreateRecordResponse)
+		response.URI = fmt.Sprintf("at://post-%d", len(records))
+		response.CID = fmt.Sprintf("cid-%d", len(records))
+		return nil
+	}
+
+	config := Entity.Config{}
+	config.SocialMediaSync.BlueSky.Enable = true
+
+	result := SendBlueSkyWithImagesDetailed(config, "album text", writeTestImages(t, 5))
+	if !result.Success {
+		t.Fatalf("expected album publish success, got: %+v", result)
+	}
+	if result.RemoteID != "at://post-1" {
+		t.Fatalf("expected first post remote id, got: %s", result.RemoteID)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected 2 threaded posts, got %d", len(records))
+	}
+
+	first := records[0]
+	if first["text"] != "album text" {
+		t.Fatalf("unexpected first post text: %+v", first["text"])
+	}
+	if len(first["embed"].(map[string]any)["images"].([]map[string]any)) != 4 {
+		t.Fatalf("expected 4 images on first post, got: %+v", first["embed"])
+	}
+	if _, exists := first["reply"]; exists {
+		t.Fatalf("expected first post to have no reply ref")
+	}
+
+	second := records[1]
+	if second["text"] != "" {
+		t.Fatalf("expected thread continuation without text, got: %+v", second["text"])
+	}
+	if len(second["embed"].(map[string]any)["images"].([]map[string]any)) != 1 {
+		t.Fatalf("expected 1 image on continuation post, got: %+v", second["embed"])
+	}
+	reply := second["reply"].(map[string]any)
+	if reply["root"].(map[string]any)["uri"] != "at://post-1" || reply["parent"].(map[string]any)["uri"] != "at://post-1" {
+		t.Fatalf("unexpected continuation reply refs: %+v", reply)
 	}
 }
