@@ -244,6 +244,7 @@ func buildBlueSkyTagFacets(message string) []map[string]any {
 
 	facets := make([]map[string]any, 0, len(matches))
 	for _, match := range matches {
+		// match: [fullStart, fullEnd, hashStart, hashEnd, bodyStart, bodyEnd]
 		hashStart := match[2]
 		bodyStart := match[4]
 		body := message[bodyStart:match[5]]
