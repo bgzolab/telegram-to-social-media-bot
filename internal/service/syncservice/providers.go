@@ -6,18 +6,12 @@ import (
 	"telegram-message-sync-bot/pkg/SocialMediaUtils"
 )
 
-var sendBlueSkyText = SocialMediaUtils.SendBlueSky
-var sendBlueSkyImage = SocialMediaUtils.SendBlueSkyWithImage
-var sendMastodonText = SocialMediaUtils.SendMastodon
-var sendMastodonImage = SocialMediaUtils.SendMastodonWithImage
-var sendTwitterText = SocialMediaUtils.SendTwitter
-var sendTwitterImage = SocialMediaUtils.SendTwitterWithImage
 var sendBlueSkyTextDetailed = SocialMediaUtils.SendBlueSkyDetailed
-var sendBlueSkyImageDetailed = SocialMediaUtils.SendBlueSkyWithImageDetailed
+var sendBlueSkyImagesDetailed = SocialMediaUtils.SendBlueSkyWithImagesDetailed
 var sendMastodonTextDetailed = SocialMediaUtils.SendMastodonDetailed
-var sendMastodonImageDetailed = SocialMediaUtils.SendMastodonWithImageDetailed
+var sendMastodonImagesDetailed = SocialMediaUtils.SendMastodonWithImagesDetailed
 var sendTwitterTextDetailed = SocialMediaUtils.SendTwitterDetailed
-var sendTwitterImageDetailed = SocialMediaUtils.SendTwitterWithImageDetailed
+var sendTwitterImagesDetailed = SocialMediaUtils.SendTwitterWithImagesDetailed
 
 type blueSkySender struct{}
 
@@ -27,8 +21,9 @@ func (blueSkySender) Name() string {
 
 func (blueSkySender) Send(config Entity.Config, payload Payload) DispatchResult {
 	prepared := PreparePlatformText("BlueSky", payload.Text)
-	if payload.Image != nil && payload.Image.FilePath != "" {
-		imageResult := sendBlueSkyImageDetailed(config, prepared.Text, payload.Image.FilePath)
+	imagePaths := payload.ImagePaths()
+	if len(imagePaths) > 0 {
+		imageResult := sendBlueSkyImagesDetailed(config, prepared.Text, imagePaths)
 		if imageResult.Success {
 			return dispatchResultFromPublish("BlueSky", imageResult, true, true, prepared.Truncated)
 		}
@@ -47,8 +42,9 @@ func (mastodonSender) Name() string {
 
 func (mastodonSender) Send(config Entity.Config, payload Payload) DispatchResult {
 	prepared := PreparePlatformText("Mastodon", payload.Text)
-	if payload.Image != nil && payload.Image.FilePath != "" {
-		imageResult := sendMastodonImageDetailed(config, prepared.Text, payload.Image.FilePath)
+	imagePaths := payload.ImagePaths()
+	if len(imagePaths) > 0 {
+		imageResult := sendMastodonImagesDetailed(config, prepared.Text, imagePaths)
 		if imageResult.Success {
 			return dispatchResultFromPublish("Mastodon", imageResult, true, true, prepared.Truncated)
 		}
@@ -67,8 +63,9 @@ func (twitterSender) Name() string {
 
 func (twitterSender) Send(config Entity.Config, payload Payload) DispatchResult {
 	prepared := PreparePlatformText("Twitter", payload.Text)
-	if payload.Image != nil && payload.Image.FilePath != "" {
-		imageResult := sendTwitterImageDetailed(config, prepared.Text, payload.Image.FilePath)
+	imagePaths := payload.ImagePaths()
+	if len(imagePaths) > 0 {
+		imageResult := sendTwitterImagesDetailed(config, prepared.Text, imagePaths)
 		if imageResult.Success {
 			return dispatchResultFromPublish("Twitter", imageResult, true, true, prepared.Truncated)
 		}

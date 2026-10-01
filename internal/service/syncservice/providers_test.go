@@ -10,10 +10,10 @@ import (
 
 func TestMastodonSender_UsesImagePathWhenPresent(t *testing.T) {
 	originalTextDetailed := sendMastodonTextDetailed
-	originalImageDetailed := sendMastodonImageDetailed
+	originalImageDetailed := sendMastodonImagesDetailed
 	defer func() {
 		sendMastodonTextDetailed = originalTextDetailed
-		sendMastodonImageDetailed = originalImageDetailed
+		sendMastodonImagesDetailed = originalImageDetailed
 	}()
 
 	textCalled := false
@@ -22,13 +22,13 @@ func TestMastodonSender_UsesImagePathWhenPresent(t *testing.T) {
 		textCalled = true
 		return SocialMediaUtils.PublishResult{Success: true}
 	}
-	sendMastodonImageDetailed = func(_ Entity.Config, message string, imagePath string) SocialMediaUtils.PublishResult {
+	sendMastodonImagesDetailed = func(_ Entity.Config, message string, imagePaths []string) SocialMediaUtils.PublishResult {
 		imageCalled = true
 		if message != "hello" {
 			t.Fatalf("unexpected message: %s", message)
 		}
-		if imagePath != "/tmp/test.jpg" {
-			t.Fatalf("unexpected image path: %s", imagePath)
+		if len(imagePaths) != 1 || imagePaths[0] != "/tmp/test.jpg" {
+			t.Fatalf("unexpected image paths: %+v", imagePaths)
 		}
 		return SocialMediaUtils.PublishResult{Success: true, RemoteID: "mastodon-1", RemoteURL: "https://mastodon.example/@user/1"}
 	}
@@ -54,10 +54,10 @@ func TestMastodonSender_UsesImagePathWhenPresent(t *testing.T) {
 
 func TestBlueSkySender_UsesImagePathWhenPresent(t *testing.T) {
 	originalTextDetailed := sendBlueSkyTextDetailed
-	originalImageDetailed := sendBlueSkyImageDetailed
+	originalImageDetailed := sendBlueSkyImagesDetailed
 	defer func() {
 		sendBlueSkyTextDetailed = originalTextDetailed
-		sendBlueSkyImageDetailed = originalImageDetailed
+		sendBlueSkyImagesDetailed = originalImageDetailed
 	}()
 
 	textCalled := false
@@ -66,13 +66,13 @@ func TestBlueSkySender_UsesImagePathWhenPresent(t *testing.T) {
 		textCalled = true
 		return SocialMediaUtils.PublishResult{Success: true}
 	}
-	sendBlueSkyImageDetailed = func(_ Entity.Config, message string, imagePath string) SocialMediaUtils.PublishResult {
+	sendBlueSkyImagesDetailed = func(_ Entity.Config, message string, imagePaths []string) SocialMediaUtils.PublishResult {
 		imageCalled = true
 		if message != "hello" {
 			t.Fatalf("unexpected message: %s", message)
 		}
-		if imagePath != "/tmp/test.jpg" {
-			t.Fatalf("unexpected image path: %s", imagePath)
+		if len(imagePaths) != 1 || imagePaths[0] != "/tmp/test.jpg" {
+			t.Fatalf("unexpected image paths: %+v", imagePaths)
 		}
 		return SocialMediaUtils.PublishResult{Success: true, RemoteID: "at://did:plc:test/app.bsky.feed.post/123"}
 	}
@@ -101,10 +101,10 @@ func TestBlueSkySender_UsesImagePathWhenPresent(t *testing.T) {
 
 func TestBlueSkySender_FallsBackToTextWhenNoImage(t *testing.T) {
 	originalTextDetailed := sendBlueSkyTextDetailed
-	originalImageDetailed := sendBlueSkyImageDetailed
+	originalImageDetailed := sendBlueSkyImagesDetailed
 	defer func() {
 		sendBlueSkyTextDetailed = originalTextDetailed
-		sendBlueSkyImageDetailed = originalImageDetailed
+		sendBlueSkyImagesDetailed = originalImageDetailed
 	}()
 
 	textCalled := false
@@ -116,7 +116,7 @@ func TestBlueSkySender_FallsBackToTextWhenNoImage(t *testing.T) {
 		}
 		return SocialMediaUtils.PublishResult{Success: true, RemoteID: "at://did:plc:test/app.bsky.feed.post/456"}
 	}
-	sendBlueSkyImageDetailed = func(_ Entity.Config, _ string, _ string) SocialMediaUtils.PublishResult {
+	sendBlueSkyImagesDetailed = func(_ Entity.Config, _ string, _ []string) SocialMediaUtils.PublishResult {
 		imageCalled = true
 		return SocialMediaUtils.PublishResult{Success: true}
 	}
@@ -139,10 +139,10 @@ func TestBlueSkySender_FallsBackToTextWhenNoImage(t *testing.T) {
 
 func TestTwitterSender_UsesImagePathWhenPresent(t *testing.T) {
 	originalTextDetailed := sendTwitterTextDetailed
-	originalImageDetailed := sendTwitterImageDetailed
+	originalImageDetailed := sendTwitterImagesDetailed
 	defer func() {
 		sendTwitterTextDetailed = originalTextDetailed
-		sendTwitterImageDetailed = originalImageDetailed
+		sendTwitterImagesDetailed = originalImageDetailed
 	}()
 
 	textCalled := false
@@ -151,13 +151,13 @@ func TestTwitterSender_UsesImagePathWhenPresent(t *testing.T) {
 		textCalled = true
 		return SocialMediaUtils.PublishResult{Success: true}
 	}
-	sendTwitterImageDetailed = func(_ Entity.Config, message string, imagePath string) SocialMediaUtils.PublishResult {
+	sendTwitterImagesDetailed = func(_ Entity.Config, message string, imagePaths []string) SocialMediaUtils.PublishResult {
 		imageCalled = true
 		if message != "hello" {
 			t.Fatalf("unexpected message: %s", message)
 		}
-		if imagePath != "/tmp/test.jpg" {
-			t.Fatalf("unexpected image path: %s", imagePath)
+		if len(imagePaths) != 1 || imagePaths[0] != "/tmp/test.jpg" {
+			t.Fatalf("unexpected image paths: %+v", imagePaths)
 		}
 		return SocialMediaUtils.PublishResult{Success: true, RemoteID: "123", RemoteURL: "https://twitter.com/i/web/status/123"}
 	}
@@ -183,10 +183,10 @@ func TestTwitterSender_UsesImagePathWhenPresent(t *testing.T) {
 
 func TestTwitterSender_FallsBackToTextWhenNoImage(t *testing.T) {
 	originalTextDetailed := sendTwitterTextDetailed
-	originalImageDetailed := sendTwitterImageDetailed
+	originalImageDetailed := sendTwitterImagesDetailed
 	defer func() {
 		sendTwitterTextDetailed = originalTextDetailed
-		sendTwitterImageDetailed = originalImageDetailed
+		sendTwitterImagesDetailed = originalImageDetailed
 	}()
 
 	textCalled := false
@@ -198,7 +198,7 @@ func TestTwitterSender_FallsBackToTextWhenNoImage(t *testing.T) {
 		}
 		return SocialMediaUtils.PublishResult{Success: true, RemoteID: "456", RemoteURL: "https://twitter.com/i/web/status/456"}
 	}
-	sendTwitterImageDetailed = func(_ Entity.Config, _ string, _ string) SocialMediaUtils.PublishResult {
+	sendTwitterImagesDetailed = func(_ Entity.Config, _ string, _ []string) SocialMediaUtils.PublishResult {
 		imageCalled = true
 		return SocialMediaUtils.PublishResult{Success: true}
 	}
@@ -221,10 +221,10 @@ func TestTwitterSender_FallsBackToTextWhenNoImage(t *testing.T) {
 
 func TestMastodonSender_FallsBackToTextWhenNoImage(t *testing.T) {
 	originalTextDetailed := sendMastodonTextDetailed
-	originalImageDetailed := sendMastodonImageDetailed
+	originalImageDetailed := sendMastodonImagesDetailed
 	defer func() {
 		sendMastodonTextDetailed = originalTextDetailed
-		sendMastodonImageDetailed = originalImageDetailed
+		sendMastodonImagesDetailed = originalImageDetailed
 	}()
 
 	textCalled := false
@@ -236,7 +236,7 @@ func TestMastodonSender_FallsBackToTextWhenNoImage(t *testing.T) {
 		}
 		return SocialMediaUtils.PublishResult{Success: true, RemoteID: "mastodon-2", RemoteURL: "https://mastodon.example/@user/2"}
 	}
-	sendMastodonImageDetailed = func(_ Entity.Config, _ string, _ string) SocialMediaUtils.PublishResult {
+	sendMastodonImagesDetailed = func(_ Entity.Config, _ string, _ []string) SocialMediaUtils.PublishResult {
 		imageCalled = true
 		return SocialMediaUtils.PublishResult{Success: true}
 	}
@@ -259,10 +259,10 @@ func TestMastodonSender_FallsBackToTextWhenNoImage(t *testing.T) {
 
 func TestBlueSkySender_FallsBackToTextWhenImageSendFails(t *testing.T) {
 	originalTextDetailed := sendBlueSkyTextDetailed
-	originalImageDetailed := sendBlueSkyImageDetailed
+	originalImageDetailed := sendBlueSkyImagesDetailed
 	defer func() {
 		sendBlueSkyTextDetailed = originalTextDetailed
-		sendBlueSkyImageDetailed = originalImageDetailed
+		sendBlueSkyImagesDetailed = originalImageDetailed
 	}()
 
 	textCalled := false
@@ -270,7 +270,7 @@ func TestBlueSkySender_FallsBackToTextWhenImageSendFails(t *testing.T) {
 		textCalled = true
 		return SocialMediaUtils.PublishResult{Success: true, RemoteID: "at://did:plc:test/app.bsky.feed.post/fallback"}
 	}
-	sendBlueSkyImageDetailed = func(_ Entity.Config, _ string, _ string) SocialMediaUtils.PublishResult {
+	sendBlueSkyImagesDetailed = func(_ Entity.Config, _ string, _ []string) SocialMediaUtils.PublishResult {
 		return SocialMediaUtils.PublishResult{Success: false, ErrorMessage: "upload failed"}
 	}
 
@@ -291,16 +291,16 @@ func TestBlueSkySender_FallsBackToTextWhenImageSendFails(t *testing.T) {
 
 func TestMastodonSender_FallbackKeepsImageErrorWhenTextSucceeds(t *testing.T) {
 	originalTextDetailed := sendMastodonTextDetailed
-	originalImageDetailed := sendMastodonImageDetailed
+	originalImageDetailed := sendMastodonImagesDetailed
 	defer func() {
 		sendMastodonTextDetailed = originalTextDetailed
-		sendMastodonImageDetailed = originalImageDetailed
+		sendMastodonImagesDetailed = originalImageDetailed
 	}()
 
 	sendMastodonTextDetailed = func(_ Entity.Config, _ string) SocialMediaUtils.PublishResult {
 		return SocialMediaUtils.PublishResult{Success: true, RemoteID: "mastodon-fallback"}
 	}
-	sendMastodonImageDetailed = func(_ Entity.Config, _ string, _ string) SocialMediaUtils.PublishResult {
+	sendMastodonImagesDetailed = func(_ Entity.Config, _ string, _ []string) SocialMediaUtils.PublishResult {
 		return SocialMediaUtils.PublishResult{Success: false, ErrorMessage: "scope missing"}
 	}
 

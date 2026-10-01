@@ -3,6 +3,7 @@ package SocialMediaUtils
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"regexp"
@@ -45,15 +46,28 @@ func SendBlueSkyWithImage(config Entity.Config, Message string, imagePath string
 	return SendBlueSkyWithImageDetailed(config, Message, imagePath).Success
 }
 
+func SendBlueSkyWithImages(config Entity.Config, Message string, imagePaths []string) bool {
+	return SendBlueSkyWithImagesDetailed(config, Message, imagePaths).Success
+}
+
 func SendBlueSkyDetailed(config Entity.Config, message string) PublishResult {
-	return sendBlueSkyPostDetailed(config, message, "")
+	return sendBlueSkyImagesPostDetailed(config, message, nil)
 }
 
 func SendBlueSkyWithImageDetailed(config Entity.Config, message string, imagePath string) PublishResult {
-	return sendBlueSkyPostDetailed(config, message, imagePath)
+	if imagePath == "" {
+		return sendBlueSkyImagesPostDetailed(config, message, nil)
+	}
+	return sendBlueSkyImagesPostDetailed(config, message, []string{imagePath})
 }
 
-func sendBlueSkyPostDetailed(config Entity.Config, message string, imagePath string) PublishResult {
+// SendBlueSkyWithImagesDetailed 发布“文本 + 多图”帖子；超过单帖上限的图片按回复线程续发。
+// 这样做的原因是相册聚合后的成员图片数可能超过平台单帖上限，不能静默丢弃。
+func SendBlueSkyWithImagesDetailed(config Entity.Config, message string, imagePaths []string) PublishResult {
+	return sendBlueSkyImagesPostDetailed(config, message, imagePaths)
+}
+
+func sendBlueSkyImagesPostDetailed(config Entity.Config, message string, imagePaths []string) PublishResult {
 	if config.SocialMediaSync.BlueSky.Enable == false {
 		return PublishResult{ErrorMessage: "BlueSky is not enabled in the configuration."}
 	}
@@ -69,31 +83,89 @@ func sendBlueSkyPostDetailed(config Entity.Config, message string, imagePath str
 		return PublishResult{ErrorMessage: err.Error()}
 	}
 	bearerToken := dst.AccessJWT
-
-	post, err := buildBlueSkyPost(message, imagePath, bearerToken)
-	if err != nil {
-		return PublishResult{ErrorMessage: err.Error()}
-	}
 	var repoName string = dst.DID
 	if repoName == "" {
 		repoName = identifier
 	}
 	var collection string = "app.bsky.feed.post"
 
-	var created repo.CreateRecordResponse
-	recordErr := blueSkyCreateRecord(&created, bearerToken, repoName, collection, post)
+	chunks := chunkImagePaths(imagePaths, maxImagesPerPost)
+	if len(chunks) == 0 {
+		chunks = [][]string{nil}
+	}
 
-	if nil != recordErr {
-		return PublishResult{ErrorMessage: recordErr.Error()}
+	result := PublishResult{}
+	skippedImages := 0
+	var rootURI, rootCID, parentURI, parentCID string
+	for index, chunk := range chunks {
+		postText := ""
+		if index == 0 {
+			postText = message
+		}
+
+		post, skipped, err := buildBlueSkyPostWithImages(postText, chunk, bearerToken, buildBlueSkyReplyRef(rootURI, rootCID, parentURI, parentCID))
+		skippedImages += skipped
+		if err != nil {
+			if index == 0 {
+				return PublishResult{ErrorMessage: err.Error()}
+			}
+			result.ErrorMessage = fmt.Sprintf("后续图片线程发布失败: %v", err)
+			break
+		}
+
+		var created repo.CreateRecordResponse
+		recordErr := blueSkyCreateRecord(&created, bearerToken, repoName, collection, post)
+		if nil != recordErr {
+			if index == 0 {
+				return PublishResult{ErrorMessage: recordErr.Error()}
+			}
+			result.ErrorMessage = fmt.Sprintf("后续图片线程发布失败: %v", recordErr)
+			break
+		}
+
+		if index == 0 {
+			remoteID := created.URI
+			if remoteID == "" {
+				remoteID = created.CID
+			}
+			result.Success = true
+			result.RemoteID = remoteID
+		}
+		if rootURI == "" {
+			rootURI, rootCID = created.URI, created.CID
+		}
+		parentURI, parentCID = created.URI, created.CID
 	}
-	remoteID := created.URI
-	if remoteID == "" {
-		remoteID = created.CID
+
+	if result.Success && skippedImages > 0 && result.ErrorMessage == "" {
+		result.ErrorMessage = fmt.Sprintf("%d 张图片上传失败，已跳过", skippedImages)
 	}
-	return PublishResult{Success: true, RemoteID: remoteID}
+
+	return result
 }
 
-func buildBlueSkyPost(message string, imagePath string, bearerToken string) (map[string]any, error) {
+// buildBlueSkyReplyRef 构造线程回复引用；根帖与父帖信息缺失时返回 nil，按独立帖子发布。
+func buildBlueSkyReplyRef(rootURI, rootCID, parentURI, parentCID string) map[string]any {
+	if rootURI == "" || rootCID == "" || parentURI == "" || parentCID == "" {
+		return nil
+	}
+
+	return map[string]any{
+		"root": map[string]any{
+			"uri": rootURI,
+			"cid": rootCID,
+		},
+		"parent": map[string]any{
+			"uri": parentURI,
+			"cid": parentCID,
+		},
+	}
+}
+
+// buildBlueSkyPostWithImages 构造帖子记录：文本 facets + 多图 embed + 可选线程回复引用。
+// 返回被跳过的图片数量：单张图片上传失败时跳过该图片，只有全部图片都失败才返回错误，
+// 交由上层决定降级为纯文本；部分失败会由调用方写入投递结果的错误信息。
+func buildBlueSkyPostWithImages(message string, imagePaths []string, bearerToken string, reply map[string]any) (map[string]any, int, error) {
 	when := time.Now().Format("2006-01-02T15:04:05.999Z")
 	post := map[string]any{
 		"$type":     "app.bsky.feed.post",
@@ -105,27 +177,41 @@ func buildBlueSkyPost(message string, imagePath string, bearerToken string) (map
 	if len(facets) > 0 {
 		post["facets"] = facets
 	}
-
-	if imagePath == "" {
-		return post, nil
+	if reply != nil {
+		post["reply"] = reply
 	}
 
-	blob, err := uploadBlueSkyBlob(imagePath, bearerToken)
-	if err != nil {
-		return nil, err
+	if len(imagePaths) == 0 {
+		return post, 0, nil
+	}
+
+	images := make([]map[string]any, 0, len(imagePaths))
+	var uploadErr error
+	for _, imagePath := range imagePaths {
+		blob, err := uploadBlueSkyBlob(imagePath, bearerToken)
+		if err != nil {
+			uploadErr = err
+			continue
+		}
+
+		images = append(images, map[string]any{
+			"alt":   "",
+			"image": blob,
+		})
+	}
+	if len(images) == 0 {
+		if uploadErr == nil {
+			uploadErr = os.ErrInvalid
+		}
+		return nil, len(imagePaths), uploadErr
 	}
 
 	post["embed"] = map[string]any{
-		"$type": "app.bsky.embed.images",
-		"images": []map[string]any{
-			{
-				"alt":   "",
-				"image": blob,
-			},
-		},
+		"$type":  "app.bsky.embed.images",
+		"images": images,
 	}
 
-	return post, nil
+	return post, len(imagePaths) - len(images), nil
 }
 
 func uploadBlueSkyBlob(imagePath string, bearerToken string) (map[string]any, error) {
@@ -151,7 +237,7 @@ func uploadBlueSkyBlob(imagePath string, bearerToken string) (map[string]any, er
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, os.ErrInvalid
+		return nil, fmt.Errorf("bluesky blob upload failed: %s", resp.Status)
 	}
 
 	var payload struct {
@@ -161,7 +247,7 @@ func uploadBlueSkyBlob(imagePath string, bearerToken string) (map[string]any, er
 		return nil, err
 	}
 	if payload.Blob == nil {
-		return nil, os.ErrInvalid
+		return nil, fmt.Errorf("bluesky blob upload returned empty blob")
 	}
 
 	return payload.Blob, nil

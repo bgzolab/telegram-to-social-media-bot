@@ -60,7 +60,7 @@ func BackfillFromJSON(config Entity.Config) (BackfillStats, error) {
 			archiveTime = info.ModTime()
 		}
 
-		message := archiveservice.BuildArchivedMessage(meta, msgText, archiveTime, nil)
+		message := archiveservice.BuildArchivedMessage(meta, msgText, archiveTime, nil, update.Message.MediaGroupID)
 		if _, err := Database.SaveMessage(&message); err != nil {
 			if Database.IsDuplicateMessageError(err) {
 				stats.Duplicates++
@@ -134,4 +134,73 @@ func decodeUpdate(path string) (*models.Update, os.FileInfo, error) {
 	}
 
 	return &update, info, nil
+}
+
+// MediaGroupBackfillStats 汇总历史相册分组ID的回填结果。
+type MediaGroupBackfillStats struct {
+	Scanned     int
+	WithGroup   int
+	Updated     int
+	Unchanged   int
+	Skipped     int
+	Failed      int
+	FailedFiles []string
+}
+
+// BackfillMediaGroupIDs 扫描历史 JSON，把 media_group_id 回填到已归档消息行。
+// 这样做的原因是功能上线前入库的消息没有分组ID，只能通过原始 JSON 一次性补齐才能识别历史相册。
+// 回填只更新空分组ID，不修改正文、附件与同步状态，也不会触发任何社媒投递。
+func BackfillMediaGroupIDs(config Entity.Config) (MediaGroupBackfillStats, error) {
+	stats := MediaGroupBackfillStats{}
+
+	paths, err := collectJSONFiles(config.Output.JsonDir)
+	if err != nil {
+		return stats, err
+	}
+
+	for _, path := range paths {
+		stats.Scanned++
+
+		update, _, err := decodeUpdate(path)
+		if err != nil {
+			stats.Failed++
+			stats.FailedFiles = append(stats.FailedFiles, path)
+			continue
+		}
+		if update.Message == nil || strings.TrimSpace(update.Message.MediaGroupID) == "" {
+			stats.Skipped++
+			continue
+		}
+
+		stats.WithGroup++
+		meta := archiveservice.ResolveSourceMeta(update, config)
+		affected, err := Database.UpdateMessageMediaGroup(meta.SourceID, int64(meta.MessageID), update.Message.MediaGroupID)
+		if err != nil {
+			stats.Failed++
+			stats.FailedFiles = append(stats.FailedFiles, path)
+			continue
+		}
+		if affected > 0 {
+			stats.Updated++
+			continue
+		}
+		stats.Unchanged++
+	}
+
+	if stats.Failed > 0 {
+		return stats, summarizeMediaGroupBackfillFailure(stats)
+	}
+
+	return stats, nil
+}
+
+func summarizeMediaGroupBackfillFailure(stats MediaGroupBackfillStats) error {
+	const maxExamples = 5
+
+	files := stats.FailedFiles
+	if len(files) > maxExamples {
+		files = files[:maxExamples]
+	}
+
+	return fmt.Errorf("media group backfill completed with %d failed files: %s", stats.Failed, strings.Join(files, ", "))
 }

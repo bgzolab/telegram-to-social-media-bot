@@ -27,8 +27,9 @@ func (f *manualFakeSender) Name() string {
 func (f *manualFakeSender) Send(_ Entity.Config, payload Payload) DispatchResult {
 	f.called = true
 	f.payload = payload
-	f.result.ImageRequested = payload.Image != nil
-	f.result.UsedImage = payload.Image != nil && f.result.Success
+	hasImage := len(payload.ImagePaths()) > 0
+	f.result.ImageRequested = hasImage
+	f.result.UsedImage = hasImage && f.result.Success
 	if f.result.Platform == "" {
 		f.result.Platform = f.name
 	}
@@ -227,7 +228,8 @@ func TestManualResync_ResolvesRelativeAttachmentPath(t *testing.T) {
 	if !result.Requested {
 		t.Fatalf("expected manual resync to be requested: %+v", result)
 	}
-	if sender.payload.Image == nil || sender.payload.Image.FilePath != absImagePath {
+	imagePaths := sender.payload.ImagePaths()
+	if len(imagePaths) != 1 || imagePaths[0] != absImagePath {
 		t.Fatalf("expected resolved image path, got: %+v", sender.payload)
 	}
 }

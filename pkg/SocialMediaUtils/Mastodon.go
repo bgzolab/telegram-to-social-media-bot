@@ -40,7 +40,7 @@ func SendMastodonDetailed(globalConfig Entity.Config, Message string) PublishRes
 	}
 
 	config := initMastodon(globalConfig)
-	return postMastodon(newMastodonClient(&config), Message, "")
+	return postMastodonWithImages(newMastodonClient(&config), Message, nil)
 }
 
 func SendMastodonWithImage(globalConfig Entity.Config, Message string, imagePath string) bool {
@@ -54,38 +54,94 @@ func SendMastodonWithImageDetailed(globalConfig Entity.Config, Message string, i
 	}
 
 	config := initMastodon(globalConfig)
-	return postMastodon(newMastodonClient(&config), Message, imagePath)
+	if imagePath == "" {
+		return postMastodonWithImages(newMastodonClient(&config), Message, nil)
+	}
+	return postMastodonWithImages(newMastodonClient(&config), Message, []string{imagePath})
 }
 
-func postMastodon(client mastodonClient, message string, imagePath string) PublishResult {
+func SendMastodonWithImages(globalConfig Entity.Config, Message string, imagePaths []string) bool {
+	return SendMastodonWithImagesDetailed(globalConfig, Message, imagePaths).Success
+}
+
+// SendMastodonWithImagesDetailed 发布“文本 + 多图”嘟文；超过单帖上限的图片按回复线程续发。
+func SendMastodonWithImagesDetailed(globalConfig Entity.Config, Message string, imagePaths []string) PublishResult {
+	if globalConfig.SocialMediaSync.Mastodon.Enable == false {
+		log.Println("Mastodon is not enabled in the configuration.")
+		return PublishResult{ErrorMessage: "Mastodon is not enabled in the configuration."}
+	}
+
+	config := initMastodon(globalConfig)
+	return postMastodonWithImages(newMastodonClient(&config), Message, imagePaths)
+}
+
+func postMastodonWithImages(client mastodonClient, message string, imagePaths []string) PublishResult {
 	if client == nil {
 		return PublishResult{ErrorMessage: "mastodon client is nil"}
 	}
 
 	visibility := "public"
 
-	toot := mastodon.Toot{
-		Status:     message,
-		Visibility: visibility,
+	chunks := chunkImagePaths(imagePaths, maxImagesPerPost)
+	if len(chunks) == 0 {
+		chunks = [][]string{nil}
 	}
 
-	if imagePath != "" {
-		attachment, err := client.UploadMedia(context.Background(), imagePath)
+	result := PublishResult{}
+	skippedImages := 0
+	var lastStatusID mastodon.ID
+	for index, chunk := range chunks {
+		toot := &mastodon.Toot{Visibility: visibility}
+		if index == 0 {
+			toot.Status = message
+		}
+		if lastStatusID != "" {
+			toot.InReplyToID = lastStatusID
+		}
+
+		uploadErrMessage := ""
+		for _, imagePath := range chunk {
+			attachment, err := client.UploadMedia(context.Background(), imagePath)
+			if err != nil {
+				log.Println(err)
+				uploadErrMessage = describeMastodonMediaUploadError(err)
+				skippedImages++
+				continue
+			}
+			toot.MediaIDs = append(toot.MediaIDs, attachment.ID)
+		}
+		// 首帖图片全部上传失败时保留原有降级语义：交给上层改为纯文本发送。
+		if index == 0 && len(chunk) > 0 && len(toot.MediaIDs) == 0 {
+			return PublishResult{ErrorMessage: uploadErrMessage}
+		}
+		if index > 0 && len(toot.MediaIDs) == 0 {
+			result.ErrorMessage = fmt.Sprintf("后续图片线程发布失败: %s", uploadErrMessage)
+			break
+		}
+
+		post, err := client.PostStatus(context.Background(), toot)
 		if err != nil {
 			log.Println(err)
-			return PublishResult{ErrorMessage: describeMastodonMediaUploadError(err)}
+			if index == 0 {
+				return PublishResult{ErrorMessage: err.Error()}
+			}
+			result.ErrorMessage = fmt.Sprintf("后续图片线程发布失败: %v", err)
+			break
 		}
-		toot.MediaIDs = []mastodon.ID{attachment.ID}
+
+		if index == 0 {
+			result.Success = true
+			result.RemoteID = string(post.ID)
+			result.RemoteURL = post.URL
+		}
+		lastStatusID = post.ID
 	}
 
-	post, err := client.PostStatus(context.Background(), &toot)
-	if err != nil {
-		log.Println(err)
-		return PublishResult{ErrorMessage: err.Error()}
+	if result.Success && skippedImages > 0 && result.ErrorMessage == "" {
+		result.ErrorMessage = fmt.Sprintf("%d 张图片上传失败，已跳过", skippedImages)
 	}
 
-	fmt.Println("My new post is:", post)
-	return PublishResult{Success: true, RemoteID: string(post.ID), RemoteURL: post.URL}
+	return result
 }
 
 func describeMastodonMediaUploadError(err error) string {

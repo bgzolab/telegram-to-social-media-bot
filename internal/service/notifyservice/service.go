@@ -44,6 +44,11 @@ func BuildSyncNotifications(syncEnabled bool, syncReason string, results []syncs
 				suffix = "，文本已截断"
 			}
 			if result.ImageRequested && result.UsedImage {
+				// 图片全部成功时 ErrorMessage 为空；非空说明线程续发或部分图片失败。
+				if result.ErrorMessage != "" {
+					notifications = append(notifications, fmt.Sprintf("消息已同步至 %s，并附带图片，但存在部分失败%s: %s", result.Platform, suffix, result.ErrorMessage))
+					continue
+				}
 				notifications = append(notifications, fmt.Sprintf("消息已同步至 %s，并附带图片%s!", result.Platform, suffix))
 				continue
 			}
@@ -66,6 +71,28 @@ func BuildSyncNotifications(syncEnabled bool, syncReason string, results []syncs
 	}
 
 	return notifications
+}
+
+// BuildAlbumSyncNotifications 生成相册聚合同步通知：复用单消息同步文案，并补充来源链接与相册规模。
+// 这样做的原因是相册投递发生在静默窗口之后，通知需要能独立说明是哪一组消息。
+func BuildAlbumSyncNotifications(sourceLink string, imageCount int, results []syncservice.DispatchResult) []string {
+	lines := BuildSyncNotifications(true, "", results)
+	if len(lines) == 0 {
+		return nil
+	}
+
+	prefix := "相册消息"
+	if imageCount > 0 {
+		prefix = fmt.Sprintf("相册消息（%d 张图）", imageCount)
+	}
+	if sourceLink != "" {
+		prefix = sourceLink + "\n" + prefix
+	}
+
+	for i := range lines {
+		lines[i] = prefix + "\n" + lines[i]
+	}
+	return lines
 }
 
 // BuildOutboundMessages 将“目标聊天ID”与“通知文案列表”展开为最终待发送消息序列。

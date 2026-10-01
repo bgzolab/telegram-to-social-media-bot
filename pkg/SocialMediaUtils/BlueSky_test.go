@@ -8,7 +8,22 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"telegram-message-sync-bot/internal/Entity"
+
+	"github.com/reiver/go-atproto/com/atproto/repo"
+	"github.com/reiver/go-atproto/com/atproto/server"
 )
+
+// buildBlueSkyPostForTest 是单图/无图场景的测试辅助，统一走多图构建函数并忽略跳过计数。
+func buildBlueSkyPostForTest(message string, imagePath string) (map[string]any, error) {
+	var imagePaths []string
+	if imagePath != "" {
+		imagePaths = []string{imagePath}
+	}
+	post, _, err := buildBlueSkyPostWithImages(message, imagePaths, "token", nil)
+	return post, err
+}
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
@@ -41,7 +56,7 @@ func TestBuildBlueSkyPost_WithImageEmbed(t *testing.T) {
 		blueSkyHTTPClient = originalClient
 	}()
 
-	post, err := buildBlueSkyPost("hello", imagePath, "token")
+	post, err := buildBlueSkyPostForTest("hello", imagePath)
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -72,7 +87,7 @@ func TestBuildBlueSkyPost_ReturnErrorWhenUploadFails(t *testing.T) {
 		blueSkyHTTPClient = originalClient
 	}()
 
-	_, err := buildBlueSkyPost("hello", imagePath, "token")
+	_, err := buildBlueSkyPostForTest("hello", imagePath)
 	if err == nil {
 		t.Fatalf("expected buildBlueSkyPost failure when upload fails")
 	}
@@ -81,7 +96,7 @@ func TestBuildBlueSkyPost_ReturnErrorWhenUploadFails(t *testing.T) {
 func TestBuildBlueSkyPost_AddsLinkFacets(t *testing.T) {
 	message := "read this https://example.com/path?x=1 and this https://bsky.app/profile/test"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -113,7 +128,7 @@ func TestBuildBlueSkyPost_AddsLinkFacets(t *testing.T) {
 func TestBuildBlueSkyPost_TrimsTrailingPunctuationFromLinkFacet(t *testing.T) {
 	message := "see https://example.com/test."
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -128,7 +143,7 @@ func TestBuildBlueSkyPost_TrimsTrailingPunctuationFromLinkFacet(t *testing.T) {
 func TestBuildBlueSkyPost_AddsTagFacets(t *testing.T) {
 	message := "hello #update #pm"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -169,7 +184,7 @@ func TestBuildBlueSkyPost_AddsTagFacets(t *testing.T) {
 func TestBuildBlueSkyPost_TagFacetUsesUTF8ByteOffsets(t *testing.T) {
 	message := "中文 #标签"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -196,7 +211,7 @@ func TestBuildBlueSkyPost_TagFacetUsesUTF8ByteOffsets(t *testing.T) {
 func TestBuildBlueSkyPost_SkipsInvalidTagFacets(t *testing.T) {
 	message := "#123 #1_2 #update2026"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -215,7 +230,7 @@ func TestBuildBlueSkyPost_SkipsInvalidTagFacets(t *testing.T) {
 func TestBuildBlueSkyPost_TrimsTrailingPunctuationFromTagFacet(t *testing.T) {
 	message := "hello #tag."
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -235,7 +250,7 @@ func TestBuildBlueSkyPost_TrimsTrailingPunctuationFromTagFacet(t *testing.T) {
 func TestBuildBlueSkyPost_CombinesLinkAndTagFacets(t *testing.T) {
 	message := "see https://example.com/x #tag"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -259,7 +274,7 @@ func TestBuildBlueSkyPost_CombinesLinkAndTagFacets(t *testing.T) {
 func TestBuildBlueSkyPost_DoesNotTagURLFragments(t *testing.T) {
 	message := "see https://example.com/page#section"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -279,7 +294,7 @@ func TestBuildBlueSkyPost_SkipsTooLongTagFacet(t *testing.T) {
 	validTag := strings.Repeat("a", 64)
 	message := "#" + validTag + " #" + strings.Repeat("b", 65)
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -298,7 +313,7 @@ func TestBuildBlueSkyPost_SkipsTooLongTagFacet(t *testing.T) {
 func TestBuildBlueSkyPost_StopsTagAtUnicodeWhitespace(t *testing.T) {
 	message := "#标签\u3000后续"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -322,7 +337,7 @@ func TestBuildBlueSkyPost_StopsTagAtUnicodeWhitespace(t *testing.T) {
 func TestBuildBlueSkyPost_StopsTagAtVerticalTab(t *testing.T) {
 	message := "#tag\x0Btail"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -346,7 +361,7 @@ func TestBuildBlueSkyPost_StopsTagAtVerticalTab(t *testing.T) {
 func TestBuildBlueSkyPost_TagFacetWithFullWidthHash(t *testing.T) {
 	message := "＃中文"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
@@ -373,12 +388,235 @@ func TestBuildBlueSkyPost_TagFacetWithFullWidthHash(t *testing.T) {
 func TestBuildBlueSkyPost_SkipsKeycapEmoji(t *testing.T) {
 	message := "#️⃣ keycap"
 
-	post, err := buildBlueSkyPost(message, "", "token")
+	post, err := buildBlueSkyPostForTest(message, "")
 	if err != nil {
 		t.Fatalf("expected buildBlueSkyPost success, got: %v", err)
 	}
 
 	if facets, ok := post["facets"]; ok {
 		t.Fatalf("expected no facets for keycap emoji, got: %#v", facets)
+	}
+}
+
+func writeTestImages(t *testing.T, count int) []string {
+	t.Helper()
+
+	root := t.TempDir()
+	paths := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		path := filepath.Join(root, fmt.Sprintf("image-%d.png", i))
+		if err := os.WriteFile(path, []byte("png-data"), 0o644); err != nil {
+			t.Fatalf("failed to create test image: %v", err)
+		}
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+func stubBlueSkyBlobUpload(t *testing.T) {
+	t.Helper()
+
+	originalClient := blueSkyHTTPClient
+	blueSkyHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"blob":{"$type":"blob","mimeType":"image/png","size":8}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	t.Cleanup(func() {
+		blueSkyHTTPClient = originalClient
+	})
+}
+
+func TestBuildBlueSkyPostWithImages_EmbedsAllImages(t *testing.T) {
+	stubBlueSkyBlobUpload(t)
+	imagePaths := writeTestImages(t, 3)
+
+	post, skipped, err := buildBlueSkyPostWithImages("albums", imagePaths, "token", nil)
+	if err != nil {
+		t.Fatalf("expected build success, got: %v", err)
+	}
+	if skipped != 0 {
+		t.Fatalf("expected no skipped images, got %d", skipped)
+	}
+
+	embed := post["embed"].(map[string]any)
+	images := embed["images"].([]map[string]any)
+	if len(images) != 3 {
+		t.Fatalf("expected 3 embedded images, got %d", len(images))
+	}
+	if _, exists := post["reply"]; exists {
+		t.Fatalf("expected no reply ref for standalone post")
+	}
+}
+
+func TestBuildBlueSkyPostWithImages_AddsReplyRef(t *testing.T) {
+	imagePaths := writeTestImages(t, 1)
+
+	reply := map[string]any{
+		"root":   map[string]any{"uri": "at://root", "cid": "cid-root"},
+		"parent": map[string]any{"uri": "at://parent", "cid": "cid-parent"},
+	}
+	post, skipped, err := buildBlueSkyPostWithImages("", nil, "token", reply)
+	if err != nil {
+		t.Fatalf("expected build success, got: %v", err)
+	}
+	if skipped != 0 {
+		t.Fatalf("expected no skipped images, got %d", skipped)
+	}
+
+	storedReply := post["reply"].(map[string]any)
+	root := storedReply["root"].(map[string]any)
+	if root["uri"] != "at://root" {
+		t.Fatalf("unexpected root ref: %+v", storedReply)
+	}
+	if imagePaths == nil {
+		t.Fatalf("expected test images to exist")
+	}
+}
+
+func TestSendBlueSkyWithImagesDetailed_ThreadsOverLimitImages(t *testing.T) {
+	stubBlueSkyBlobUpload(t)
+
+	originalSession := blueSkyCreateSession
+	originalRecord := blueSkyCreateRecord
+	defer func() {
+		blueSkyCreateSession = originalSession
+		blueSkyCreateRecord = originalRecord
+	}()
+
+	blueSkyCreateSession = func(dst any, identifier string, password string) error {
+		session := dst.(*server.CreateSessionResponse)
+		session.AccessJWT = "token"
+		session.DID = "did:plc:test"
+		return nil
+	}
+
+	records := make([]map[string]any, 0, 2)
+	blueSkyCreateRecord = func(dst any, bearerToken string, repoName string, collection string, record any) error {
+		records = append(records, record.(map[string]any))
+		response := dst.(*repo.CreateRecordResponse)
+		response.URI = fmt.Sprintf("at://post-%d", len(records))
+		response.CID = fmt.Sprintf("cid-%d", len(records))
+		return nil
+	}
+
+	config := Entity.Config{}
+	config.SocialMediaSync.BlueSky.Enable = true
+
+	result := SendBlueSkyWithImagesDetailed(config, "album text", writeTestImages(t, 5))
+	if !result.Success {
+		t.Fatalf("expected album publish success, got: %+v", result)
+	}
+	if result.RemoteID != "at://post-1" {
+		t.Fatalf("expected first post remote id, got: %s", result.RemoteID)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected 2 threaded posts, got %d", len(records))
+	}
+
+	first := records[0]
+	if first["text"] != "album text" {
+		t.Fatalf("unexpected first post text: %+v", first["text"])
+	}
+	if len(first["embed"].(map[string]any)["images"].([]map[string]any)) != 4 {
+		t.Fatalf("expected 4 images on first post, got: %+v", first["embed"])
+	}
+	if _, exists := first["reply"]; exists {
+		t.Fatalf("expected first post to have no reply ref")
+	}
+
+	second := records[1]
+	if second["text"] != "" {
+		t.Fatalf("expected thread continuation without text, got: %+v", second["text"])
+	}
+	if len(second["embed"].(map[string]any)["images"].([]map[string]any)) != 1 {
+		t.Fatalf("expected 1 image on continuation post, got: %+v", second["embed"])
+	}
+	reply := second["reply"].(map[string]any)
+	if reply["root"].(map[string]any)["uri"] != "at://post-1" || reply["parent"].(map[string]any)["uri"] != "at://post-1" {
+		t.Fatalf("unexpected continuation reply refs: %+v", reply)
+	}
+}
+
+func TestBuildBlueSkyPostWithImages_CountsSkippedUploads(t *testing.T) {
+	originalClient := blueSkyHTTPClient
+	requests := 0
+	blueSkyHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if requests == 2 {
+			return nil, fmt.Errorf("upload failed")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"blob":{"$type":"blob","mimeType":"image/png","size":8}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	defer func() {
+		blueSkyHTTPClient = originalClient
+	}()
+
+	post, skipped, err := buildBlueSkyPostWithImages("albums", writeTestImages(t, 3), "token", nil)
+	if err != nil {
+		t.Fatalf("expected build success with partial uploads, got: %v", err)
+	}
+	if skipped != 1 {
+		t.Fatalf("expected 1 skipped image, got %d", skipped)
+	}
+	images := post["embed"].(map[string]any)["images"].([]map[string]any)
+	if len(images) != 2 {
+		t.Fatalf("expected 2 embedded images, got %d", len(images))
+	}
+}
+
+func TestSendBlueSkyWithImagesDetailed_ReportsSkippedUploads(t *testing.T) {
+	originalClient := blueSkyHTTPClient
+	requests := 0
+	blueSkyHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if requests == 2 {
+			return nil, fmt.Errorf("upload failed")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"blob":{"$type":"blob","mimeType":"image/png","size":8}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	defer func() {
+		blueSkyHTTPClient = originalClient
+	}()
+
+	originalSession := blueSkyCreateSession
+	originalRecord := blueSkyCreateRecord
+	defer func() {
+		blueSkyCreateSession = originalSession
+		blueSkyCreateRecord = originalRecord
+	}()
+
+	blueSkyCreateSession = func(dst any, identifier string, password string) error {
+		session := dst.(*server.CreateSessionResponse)
+		session.AccessJWT = "token"
+		session.DID = "did:plc:test"
+		return nil
+	}
+	blueSkyCreateRecord = func(dst any, bearerToken string, repoName string, collection string, record any) error {
+		response := dst.(*repo.CreateRecordResponse)
+		response.URI = "at://post-1"
+		response.CID = "cid-1"
+		return nil
+	}
+
+	config := Entity.Config{}
+	config.SocialMediaSync.BlueSky.Enable = true
+
+	result := SendBlueSkyWithImagesDetailed(config, "album text", writeTestImages(t, 3))
+	if !result.Success {
+		t.Fatalf("expected publish success despite one skipped image, got: %+v", result)
+	}
+	if result.ErrorMessage != "1 张图片上传失败，已跳过" {
+		t.Fatalf("expected skipped image notice, got: %s", result.ErrorMessage)
 	}
 }

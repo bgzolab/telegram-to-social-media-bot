@@ -18,13 +18,14 @@ type Message struct {
 
 	Content string // 消息内容
 
-	MessageID   int64        `gorm:"not null;index:idx_message_source,unique"` // 用于标识消息来源的唯一ID
-	Username    string       `gorm:"not null;index:idx_message_source,unique"` // 频道的USERNAME
-	MessageUrl  string       // 消息的URL链接
-	MessageDate time.Time    // 消息的时间戳
-	Attachments []Attachment `gorm:"foreignKey:MessageID"` // 消息附件
+	MessageID    int64        `gorm:"not null;index:idx_message_source,unique"`                                          // 用于标识消息来源的唯一ID
+	Username     string       `gorm:"not null;index:idx_message_source,unique;index:idx_message_media_group,priority:1"` // 频道的USERNAME
+	MessageUrl   string       // 消息的URL链接
+	MessageDate  time.Time    // 消息的时间戳
+	MediaGroupID string       `gorm:"index:idx_message_media_group,priority:2"` // Telegram 相册分组ID，非相册消息为空
+	Attachments  []Attachment `gorm:"foreignKey:MessageID"`                     // 消息附件
 
-	CreatedTime time.Time // 消息存档日期
+	CreatedTime time.Time `gorm:"index:idx_message_created_time"` // 消息存档日期，相册恢复扫描按此过滤
 }
 
 type Attachment struct {

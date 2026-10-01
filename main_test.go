@@ -92,6 +92,13 @@ func TestBuildRootCommand_HasMigrateJsonToDBSubcommand(t *testing.T) {
 	}
 }
 
+func TestBuildRootCommand_HasMigrateMediaGroupsSubcommand(t *testing.T) {
+	root := buildRootCommand()
+	if cmd, _, err := root.Find([]string{"migrate", "media-groups"}); err != nil || cmd == nil || cmd.Name() != "media-groups" {
+		t.Fatalf("expected migrate media-groups subcommand to exist")
+	}
+}
+
 func TestMigrateMoveLegacyHelp_Executes(t *testing.T) {
 	root := buildRootCommand()
 	buf := &bytes.Buffer{}
@@ -144,6 +151,37 @@ func TestMigrateJsonToDB_ConfigRequired(t *testing.T) {
 	root.SetOut(buf)
 	root.SetErr(buf)
 	root.SetArgs([]string{"migrate", "json-to-db"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatalf("expected error when config flag is missing")
+	}
+	if !strings.Contains(err.Error(), "required flag") {
+		t.Fatalf("expected required flag error, got: %v", err)
+	}
+}
+
+func TestMigrateMediaGroupsHelp_Executes(t *testing.T) {
+	root := buildRootCommand()
+	buf := &bytes.Buffer{}
+	root.SetOut(buf)
+	root.SetErr(buf)
+	root.SetArgs([]string{"migrate", "media-groups", "--help"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("expected migrate media-groups help execute without error, got: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Backfill media_group_id for archived messages from JSON") {
+		t.Fatalf("expected help output to contain media-groups description")
+	}
+}
+
+func TestMigrateMediaGroups_ConfigRequired(t *testing.T) {
+	root := buildRootCommand()
+	buf := &bytes.Buffer{}
+	root.SetOut(buf)
+	root.SetErr(buf)
+	root.SetArgs([]string{"migrate", "media-groups"})
 
 	err := root.Execute()
 	if err == nil {
